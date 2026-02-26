@@ -122,6 +122,26 @@ def _setup_logging(debug: bool) -> None:
         logging.getLogger("impacket").setLevel(logging.WARNING)
 
 
+def _parse_transports(transport: list[str] | None) -> set[Transport]:
+    """Convert CLI --transport values to a set of Transport enums.
+
+    None or empty → both.  Accepts "smb", "http", or both.
+    """
+    if not transport:
+        return {Transport.SMB, Transport.HTTP}
+    result: set[Transport] = set()
+    for t in transport:
+        t = t.strip().lower()
+        if t == "smb":
+            result.add(Transport.SMB)
+        elif t in ("http", "webdav"):
+            result.add(Transport.HTTP)
+        else:
+            console.print(f"[bold red]Error:[/] unknown transport {t!r} (use smb/http)")
+            raise typer.Exit(1)
+    return result
+
+
 # ── Rich output formatters ─────────────────────────────────────────
 
 _STATUS_STYLE = {
@@ -339,8 +359,11 @@ ListenerOpt = Annotated[
 HttpPortOpt = Annotated[int, typer.Option("--http-port", help="HTTP listener port")]
 SmbPortOpt = Annotated[int, typer.Option("--smb-port", help="SMB listener port")]
 TransportOpt = Annotated[
-    str,
-    typer.Option("--transport", help="Coercion transport: smb or http/WebDAV"),
+    Optional[list[str]],
+    typer.Option(
+        "--transport",
+        help="Coercion transport(s): smb, http, or both (default: both)",
+    ),
 ]
 CallbackTimeoutOpt = Annotated[
     float,
@@ -358,7 +381,7 @@ def scan(
     listener: ListenerOpt = None,
     http_port: HttpPortOpt = 80,
     smb_port: SmbPortOpt = 445,
-    transport: TransportOpt = "smb",
+    transport: TransportOpt = None,
     callback_timeout: CallbackTimeoutOpt = 3.0,
     username: UsernameOpt = "",
     password: PasswordOpt = "",
@@ -408,7 +431,7 @@ def scan(
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
-        transport=Transport.HTTP if transport == "http" else Transport.SMB,
+        transport=_parse_transports(transport),
     )
 
     if listener:
@@ -435,13 +458,12 @@ def coerce(
         typer.Option(
             "-l",
             "--listener",
-            help="Listener IP (attacker IP reachable by targets). Required.",
+            help="IP of your running relay (e.g. ntlmrelayx). Required.",
         ),
     ] = ...,  # type: ignore[assignment]
     http_port: HttpPortOpt = 80,
     smb_port: SmbPortOpt = 445,
-    transport: TransportOpt = "smb",
-    callback_timeout: CallbackTimeoutOpt = 3.0,
+    transport: TransportOpt = None,
     username: UsernameOpt = "",
     password: PasswordOpt = "",
     domain: DomainOpt = "",
@@ -460,7 +482,11 @@ def coerce(
     output_file: OutputFileOpt = None,
     debug: DebugOpt = False,
 ) -> None:
-    """Trigger coercion with a listener to capture NTLM auth.
+    """Trigger coercion pointing at your external relay.
+
+    Fires RPC calls with UNC paths pointing at --listener, where your
+    relay (e.g. ntlmrelayx) is already running.  coercex does NOT bind
+    any ports -- it only sends triggers.
 
     Use --methods / --pipes / --protocols to target specific
     vulnerabilities found during scan. Without filters, tries all methods.
@@ -486,8 +512,7 @@ def coerce(
         listener_host=listener,
         http_port=http_port,
         smb_port=smb_port,
-        transport=Transport.HTTP if transport == "http" else Transport.SMB,
-        callback_timeout=callback_timeout,
+        transport=_parse_transports(transport),
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
@@ -504,14 +529,7 @@ def coerce(
 def relay(
     target: TargetOpt = None,
     targets_file: TargetsFileOpt = None,
-    listener: Annotated[
-        str,
-        typer.Option(
-            "-l",
-            "--listener",
-            help="Interface/listener IP (attacker IP reachable by targets)",
-        ),
-    ] = ...,  # type: ignore[assignment]
+    listener: ListenerOpt = None,
     relay_to: Annotated[
         list[str],
         typer.Option(
@@ -521,7 +539,7 @@ def relay(
     ] = ...,  # type: ignore[assignment]
     http_port: HttpPortOpt = 80,
     smb_port: SmbPortOpt = 445,
-    transport: TransportOpt = "smb",
+    transport: TransportOpt = None,
     # Attack options
     adcs: Annotated[
         bool, typer.Option("--adcs", help="Enable AD CS relay attack")
@@ -575,7 +593,10 @@ def relay(
 ) -> None:
     """Trigger coercion and relay captured NTLM auth to target services.
 
-    Tries all path styles (like scan) but through impacket relay servers.
+    Starts impacket relay servers (HTTP + SMB on all interfaces),
+    then tries all path styles per method.
+
+    --listener is optional; if omitted the local IP is auto-detected.
     Use --methods / --pipes / --protocols to target specific vulnerabilities.
     """
     _setup_logging(debug)
@@ -596,10 +617,10 @@ def relay(
         methods_filter=methods,
         pipes_filter=pipes,
         creds=creds,
-        listener_host=listener,
+        listener_host=listener or "",
         http_port=http_port,
         smb_port=smb_port,
-        transport=Transport.HTTP if transport == "http" else Transport.SMB,
+        transport=_parse_transports(transport),
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,

