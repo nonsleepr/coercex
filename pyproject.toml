@@ -5,6 +5,8 @@ description = "Async NTLM authentication coercion scanner and fuzzer"
 requires-python = ">=3.11"
 dependencies = [
     "impacket>=0.11.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
 ]
 
 [project.scripts]

