@@ -1,7 +1,9 @@
 """Command-line interface for coercex.
 
-Modern Typer-based CLI with Rich output. Provides scan, coerce, fuzz,
-and relay subcommands.
+Modern Typer-based CLI with Rich output.  Three subcommands:
+  scan   - detect vulnerable methods (all path styles, optional listener)
+  coerce - trigger coercion with listener (specific or all methods)
+  relay  - coercion + NTLM relay (all path styles through relay servers)
 """
 
 from __future__ import annotations
@@ -20,14 +22,14 @@ from coercex.methods import ALL_PROTOCOLS
 from coercex.scanner import Mode, ScanConfig, Scanner
 from coercex.utils import Credentials, ScanStats, Transport, TriggerResult
 
-# ── Rich console ────────────────────────────────────────────────────
+# ── Rich consoles ───────────────────────────────────────────────────
 console = Console(stderr=True)
 out_console = Console()  # stdout for results
 
 # ── Typer app ───────────────────────────────────────────────────────
 app = typer.Typer(
     name="coercex",
-    help="Async NTLM authentication coercion scanner & fuzzer",
+    help="Async NTLM authentication coercion scanner & relay tool",
     no_args_is_help=True,
     rich_markup_mode="rich",
     add_completion=False,
@@ -53,10 +55,10 @@ def _main(
         ),
     ] = False,
 ) -> None:
-    """Async NTLM authentication coercion scanner & fuzzer."""
+    """Async NTLM authentication coercion scanner & relay tool."""
 
 
-# ── Helper: parse targets ───────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────
 
 
 def _parse_targets(
@@ -65,13 +67,11 @@ def _parse_targets(
 ) -> list[str]:
     """Resolve target list from CLI arguments."""
     result: list[str] = []
-
     if target:
         for t in target.split(","):
             t = t.strip()
             if t:
                 result.append(t)
-
     if targets_file:
         try:
             with open(targets_file) as f:
@@ -82,11 +82,7 @@ def _parse_targets(
         except FileNotFoundError:
             console.print(f"[bold red]Error:[/] targets file not found: {targets_file}")
             raise typer.Exit(1)
-
     return result
-
-
-# ── Helper: build credentials ───────────────────────────────────────
 
 
 def _build_creds(
@@ -112,9 +108,6 @@ def _build_creds(
     if creds.ccache or (creds.do_kerberos and not creds.password and not creds.hashes):
         creds.load_ccache()
     return creds
-
-
-# ── Helper: configure logging ──────────────────────────────────────
 
 
 def _setup_logging(debug: bool) -> None:
@@ -256,7 +249,6 @@ def _output_results(
     else:
         table = format_results_table_rich(stats, show_all=verbose)
         if output_file:
-            # Write plain text table to file
             file_console = Console(file=open(output_file, "w"), width=200)
             file_console.print(table)
             file_console.file.close()
@@ -271,11 +263,10 @@ def _output_results(
 
 
 # ── Shared option types ─────────────────────────────────────────────
-# These Annotated types are reused across subcommands.
 
 TargetOpt = Annotated[
     Optional[str],
-    typer.Option("-t", "--target", help="Target host(s), comma-separated"),
+    typer.Option("-t", "--target", help="Target host(s) or IPs, comma-separated"),
 ]
 TargetsFileOpt = Annotated[
     Optional[str],
@@ -307,6 +298,21 @@ ProtocolsOpt = Annotated[
         help=f"Filter by protocol(s): {', '.join(ALL_PROTOCOLS)}",
     ),
 ]
+MethodsOpt = Annotated[
+    Optional[list[str]],
+    typer.Option(
+        "--methods",
+        "-m",
+        help="Filter by method name (glob/regex). E.g. 'RpcRemote*' or 'EfsRpc.*Raw'",
+    ),
+]
+PipesOpt = Annotated[
+    Optional[list[str]],
+    typer.Option(
+        "--pipes",
+        help=r"Filter by named pipe. E.g. '\PIPE\spoolss'",
+    ),
+]
 ConcurrencyOpt = Annotated[
     int, typer.Option("-c", "--concurrency", help="Max concurrent tasks")
 ]
@@ -327,7 +333,7 @@ ListenerOpt = Annotated[
     typer.Option(
         "-l",
         "--listener",
-        help="Listener IP (attacker IP reachable by targets). Optional — if omitted, works like scan mode (classify errors only).",
+        help="Listener IP (attacker IP reachable by targets).",
     ),
 ]
 HttpPortOpt = Annotated[int, typer.Option("--http-port", help="HTTP listener port")]
@@ -349,6 +355,11 @@ CallbackTimeoutOpt = Annotated[
 def scan(
     target: TargetOpt = None,
     targets_file: TargetsFileOpt = None,
+    listener: ListenerOpt = None,
+    http_port: HttpPortOpt = 80,
+    smb_port: SmbPortOpt = 445,
+    transport: TransportOpt = "smb",
+    callback_timeout: CallbackTimeoutOpt = 3.0,
     username: UsernameOpt = "",
     password: PasswordOpt = "",
     domain: DomainOpt = "",
@@ -358,6 +369,8 @@ def scan(
     dc_host: DcHostOpt = "",
     ccache: CcacheOpt = "",
     protocols: ProtocolsOpt = None,
+    methods: MethodsOpt = None,
+    pipes: PipesOpt = None,
     concurrency: ConcurrencyOpt = 50,
     timeout: TimeoutOpt = 5,
     verbose: VerboseOpt = False,
@@ -365,7 +378,15 @@ def scan(
     output_file: OutputFileOpt = None,
     debug: DebugOpt = False,
 ) -> None:
-    """Scan targets for coercible RPC methods (no listener needed)."""
+    """Detect vulnerable coercion methods by trying all path styles.
+
+    Tries every method/pipe/transport/path-style combination to find
+    which RPC methods are vulnerable on each target.
+
+    Listener is optional:
+      Without -l: classifies RPC error codes (fast, no callback needed).
+      With -l: also starts a listener to confirm actual callbacks.
+    """
     _setup_logging(debug)
 
     targets = _parse_targets(target, targets_file)
@@ -381,11 +402,22 @@ def scan(
         targets=targets,
         mode=Mode.SCAN,
         protocols=protocols,
+        methods_filter=methods,
+        pipes_filter=pipes,
         creds=creds,
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
+        transport=Transport.HTTP if transport == "http" else Transport.SMB,
     )
+
+    if listener:
+        config.listener_host = listener
+        config.http_port = http_port
+        config.smb_port = smb_port
+        config.callback_timeout = callback_timeout
+    else:
+        console.print("[dim]No --listener set. Classifying by RPC error codes only.[/]")
 
     stats = asyncio.run(_run(config))
     _output_results(stats, json_output, verbose, output_file or "")
@@ -398,7 +430,14 @@ def scan(
 def coerce(
     target: TargetOpt = None,
     targets_file: TargetsFileOpt = None,
-    listener: ListenerOpt = None,
+    listener: Annotated[
+        str,
+        typer.Option(
+            "-l",
+            "--listener",
+            help="Listener IP (attacker IP reachable by targets). Required.",
+        ),
+    ] = ...,  # type: ignore[assignment]
     http_port: HttpPortOpt = 80,
     smb_port: SmbPortOpt = 445,
     transport: TransportOpt = "smb",
@@ -412,6 +451,8 @@ def coerce(
     dc_host: DcHostOpt = "",
     ccache: CcacheOpt = "",
     protocols: ProtocolsOpt = None,
+    methods: MethodsOpt = None,
+    pipes: PipesOpt = None,
     concurrency: ConcurrencyOpt = 50,
     timeout: TimeoutOpt = 5,
     verbose: VerboseOpt = False,
@@ -419,10 +460,10 @@ def coerce(
     output_file: OutputFileOpt = None,
     debug: DebugOpt = False,
 ) -> None:
-    """Trigger coercion to capture NTLM auth.
+    """Trigger coercion with a listener to capture NTLM auth.
 
-    If --listener is provided, starts a listener to confirm callbacks.
-    Otherwise, behaves like scan mode (classifies errors only).
+    Use --methods / --pipes / --protocols to target specific
+    vulnerabilities found during scan. Without filters, tries all methods.
     """
     _setup_logging(debug)
 
@@ -439,89 +480,18 @@ def coerce(
         targets=targets,
         mode=Mode.COERCE,
         protocols=protocols,
+        methods_filter=methods,
+        pipes_filter=pipes,
         creds=creds,
-        concurrency=concurrency,
-        timeout=timeout,
-        verbose=verbose,
+        listener_host=listener,
+        http_port=http_port,
+        smb_port=smb_port,
         transport=Transport.HTTP if transport == "http" else Transport.SMB,
-    )
-
-    if listener:
-        config.listener_host = listener
-        config.http_port = http_port
-        config.smb_port = smb_port
-        config.callback_timeout = callback_timeout
-    else:
-        console.print(
-            "[yellow]No --listener set.[/] Running without listener (error classification only)."
-        )
-
-    stats = asyncio.run(_run(config))
-    _output_results(stats, json_output, verbose, output_file or "")
-
-
-# ── fuzz ────────────────────────────────────────────────────────────
-
-
-@app.command()
-def fuzz(
-    target: TargetOpt = None,
-    targets_file: TargetsFileOpt = None,
-    listener: ListenerOpt = None,
-    http_port: HttpPortOpt = 80,
-    smb_port: SmbPortOpt = 445,
-    callback_timeout: CallbackTimeoutOpt = 3.0,
-    username: UsernameOpt = "",
-    password: PasswordOpt = "",
-    domain: DomainOpt = "",
-    hashes: HashesOpt = "",
-    aes_key: AesKeyOpt = "",
-    kerberos: KerberosOpt = False,
-    dc_host: DcHostOpt = "",
-    ccache: CcacheOpt = "",
-    protocols: ProtocolsOpt = None,
-    concurrency: ConcurrencyOpt = 50,
-    timeout: TimeoutOpt = 5,
-    verbose: VerboseOpt = False,
-    json_output: JsonOpt = False,
-    output_file: OutputFileOpt = None,
-    debug: DebugOpt = False,
-) -> None:
-    """Fuzz all path styles and transports per method.
-
-    If --listener is provided, starts a listener to confirm callbacks.
-    Otherwise, behaves like scan mode (classifies errors only).
-    """
-    _setup_logging(debug)
-
-    targets = _parse_targets(target, targets_file)
-    if not targets:
-        console.print("[bold red]Error:[/] No targets specified. Use -t or -T.")
-        raise typer.Exit(1)
-
-    creds = _build_creds(
-        username, password, domain, hashes, aes_key, kerberos, dc_host, ccache
-    )
-
-    config = ScanConfig(
-        targets=targets,
-        mode=Mode.FUZZ,
-        protocols=protocols,
-        creds=creds,
+        callback_timeout=callback_timeout,
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
     )
-
-    if listener:
-        config.listener_host = listener
-        config.http_port = http_port
-        config.smb_port = smb_port
-        config.callback_timeout = callback_timeout
-    else:
-        console.print(
-            "[yellow]No --listener set.[/] Running without listener (error classification only)."
-        )
 
     stats = asyncio.run(_run(config))
     _output_results(stats, json_output, verbose, output_file or "")
@@ -594,6 +564,8 @@ def relay(
     dc_host: DcHostOpt = "",
     ccache: CcacheOpt = "",
     protocols: ProtocolsOpt = None,
+    methods: MethodsOpt = None,
+    pipes: PipesOpt = None,
     concurrency: ConcurrencyOpt = 50,
     timeout: TimeoutOpt = 5,
     verbose: VerboseOpt = False,
@@ -603,8 +575,8 @@ def relay(
 ) -> None:
     """Trigger coercion and relay captured NTLM auth to target services.
 
-    Starts HTTP+SMB relay servers (via impacket ntlmrelayx), triggers
-    coercion, and relays captured NTLM authentication.
+    Tries all path styles (like scan) but through impacket relay servers.
+    Use --methods / --pipes / --protocols to target specific vulnerabilities.
     """
     _setup_logging(debug)
 
@@ -621,6 +593,8 @@ def relay(
         targets=targets,
         mode=Mode.RELAY,
         protocols=protocols,
+        methods_filter=methods,
+        pipes_filter=pipes,
         creds=creds,
         listener_host=listener,
         http_port=http_port,
@@ -654,7 +628,7 @@ async def _run(config: ScanConfig) -> ScanStats:
     return await scanner.run()
 
 
-# ── Typer entry point (called by __main__.py and project.scripts) ──
+# ── Typer entry point ───────────────────────────────────────────────
 
 
 def main() -> None:
