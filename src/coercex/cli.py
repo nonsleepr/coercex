@@ -406,9 +406,9 @@ def scan(
     Tries every method/pipe/transport/path-style combination to find
     which RPC methods are vulnerable on each target.
 
-    Listener is optional:
-      Without -l: classifies RPC error codes (fast, no callback needed).
-      With -l: also starts a listener to confirm actual callbacks.
+    Starts HTTP + SMB listeners to confirm actual callbacks.
+    If -l is not given, the listener IP is auto-detected from the
+    default network route.
     """
     _setup_logging(debug)
 
@@ -428,19 +428,15 @@ def scan(
         methods_filter=methods,
         pipes_filter=pipes,
         creds=creds,
+        listener_host=listener or "",
+        http_port=http_port,
+        smb_port=smb_port,
+        callback_timeout=callback_timeout,
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
         transport=_parse_transports(transport),
     )
-
-    if listener:
-        config.listener_host = listener
-        config.http_port = http_port
-        config.smb_port = smb_port
-        config.callback_timeout = callback_timeout
-    else:
-        console.print("[dim]No --listener set. Classifying by RPC error codes only.[/]")
 
     stats = asyncio.run(_run(config))
     _output_results(stats, json_output, verbose, output_file or "")

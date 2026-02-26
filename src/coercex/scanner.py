@@ -5,9 +5,9 @@ registry into a high-performance concurrent pipeline.
 
 Three modes:
   - scan:   Tries all path styles per method to detect vulnerabilities.
-            Listener optional (``-l``); without it classifies RPC errors
-            only.  When a listener IP is given, binds HTTP **and** SMB
-            on 0.0.0.0 to receive callbacks.
+            Always starts HTTP + SMB listeners on 0.0.0.0.  If ``-l``
+            is not given, the listener IP is auto-detected from the
+            default network route.
   - coerce: Fires coercion triggers with UNC paths pointing at an
             **external** relay (e.g. ntlmrelayx) that the operator
             already started.  ``-l`` is required so we know where to
@@ -140,8 +140,14 @@ class Scanner:
             f"concurrency=[bold]{self.config.concurrency}[/]"
         )
 
-        # ── Scan mode: optional listener (both HTTP+SMB) ────────────
-        if self.config.mode == Mode.SCAN and self.config.has_listener:
+        # ── Scan mode: always start listener (auto-detect IP if needed) ─
+        if self.config.mode == Mode.SCAN:
+            if not self.config.listener_host:
+                self.config.listener_host = get_local_ip()
+                self.console.print(
+                    f"[dim]Auto-detected listener IP: "
+                    f"[bold]{self.config.listener_host}[/][/]"
+                )
             self._listener = AsyncListener(
                 host="0.0.0.0",
                 http_port=self.config.http_port,

