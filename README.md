@@ -189,31 +189,24 @@ coercex scan -t dc01 -u user -p pass --json -o results.json
 
 ## Architecture
 
-```
-                    +-----------+
-                    |  CLI      |  (Typer + Rich)
-                    +-----+-----+
-                          |
-                    +-----v-----+
-                    |  Scanner  |  (async orchestrator)
-                    +-----+-----+
-                          |
-          +---------------+---------------+
-          |               |               |
-    +-----v-----+  +------v------+  +-----v-----+
-    | DCERPCPool |  |  Listener   |  |  Relay    |
-    | (conn pool)|  | (HTTP+SMB)  |  | (ntlmrelayx)
-    +-----+-----+  +------+------+  +-----+-----+
-          |               |               |
-    +-----v-----+         |         +-----v-----+
-    |  Methods   |         |         | Protocol  |
-    | (19 total) |         |         | Clients   |
-    +-----------+         |         +-----------+
-                          |
-                    +-----v-----+
-                    |  Target   |
-                    |  hosts    |
-                    +-----------+
+```mermaid
+graph TD
+    CLI["CLI<br/><i>Typer + Rich</i>"]
+    Scanner["Scanner<br/><i>async orchestrator</i>"]
+    Pool["DCERPCPool<br/><i>connection pool</i>"]
+    Listener["Listener<br/><i>HTTP + SMB</i>"]
+    Relay["Relay<br/><i>ntlmrelayx</i>"]
+    Methods["Methods<br/><i>19 across 7 protocols</i>"]
+    Targets["Target hosts"]
+
+    CLI --> Scanner
+    Scanner --> Pool
+    Scanner --> Listener
+    Scanner --> Relay
+    Pool --> Methods
+    Listener --> Targets
+    Relay --> Targets
+    Methods --> Targets
 ```
 
 - **Scanner**: Async orchestrator with semaphore-bounded concurrency, 3 modes (scan/coerce/relay)
