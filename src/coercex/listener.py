@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import struct
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 log = logging.getLogger("coercex.listener")
 

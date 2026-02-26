@@ -7,7 +7,6 @@ Similar to PrinterBug but via a different RPC interface.
 from __future__ import annotations
 
 from impacket.dcerpc.v5 import par
-from impacket.dcerpc.v5.dtypes import NULL
 
 from coercex.methods.base import CoercionMethod, PipeBinding
 

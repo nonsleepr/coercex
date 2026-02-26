@@ -12,7 +12,6 @@ import logging
 from typing import Any
 
 from impacket.dcerpc.v5 import transport as imp_transport
-from impacket.dcerpc.v5.rpcrt import DCERPCException
 from impacket.uuid import uuidtup_to_bin
 
 from coercex.methods.base import CoercionMethod, PipeBinding
@@ -20,8 +19,6 @@ from coercex.utils import (
     Credentials,
     ScanResult,
     TriggerResult,
-    Transport,
-    build_unc_path,
     classify_error,
 )
 
@@ -86,6 +83,8 @@ class DCERPCPool:
                 self._creds.lmhash,
                 self._creds.nthash,
                 self._creds.aes_key,
+                TGT=self._creds._tgt,
+                TGS=self._creds._tgs,
             )
 
         # Set Kerberos if needed

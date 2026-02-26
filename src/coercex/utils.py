@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import random
 import string
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from typing import Any
+
+log = logging.getLogger("coercex.utils")
 
 
 def random_string(length: int = 8) -> str:
@@ -45,6 +50,11 @@ class Credentials:
     aes_key: str = ""
     do_kerberos: bool = False
     dc_host: str = ""
+    ccache: str = ""  # Path to Kerberos ccache file (or empty to use KRB5CCNAME)
+
+    # Cached TGT/TGS loaded from ccache (populated by load_ccache())
+    _tgt: dict[str, Any] | None = field(default=None, repr=False)
+    _tgs: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def lmhash(self) -> str:
@@ -57,6 +67,45 @@ class Credentials:
         if self.hashes and ":" in self.hashes:
             return self.hashes.split(":")[1]
         return ""
+
+    def load_ccache(self, target_name: str = "") -> None:
+        """Load TGT/TGS from a ccache file.
+
+        Sets do_kerberos=True and populates _tgt/_tgs for use by the
+        connection pool. If self.ccache is set, it overrides KRB5CCNAME.
+
+        Args:
+            target_name: SPN target name for TGS lookup (e.g. 'cifs/dc01.corp.local').
+        """
+        if self.ccache:
+            os.environ["KRB5CCNAME"] = self.ccache
+            log.info("Using ccache file: %s", self.ccache)
+
+        ccache_path = os.environ.get("KRB5CCNAME", "")
+        if not ccache_path:
+            log.warning("No ccache path set (--ccache or KRB5CCNAME)")
+            return
+
+        try:
+            from impacket.krb5.ccache import CCache
+
+            domain, username, tgt, tgs = CCache.parseFile(
+                self.domain, self.username, target_name
+            )
+            if domain and not self.domain:
+                self.domain = domain
+            if username and not self.username:
+                self.username = username
+            if tgt:
+                self._tgt = tgt
+                log.info("Loaded TGT from ccache for %s@%s", self.username, self.domain)
+            if tgs:
+                self._tgs = tgs
+                log.info("Loaded TGS from ccache for target %s", target_name)
+
+            self.do_kerberos = True
+        except Exception as e:
+            log.error("Failed to load ccache: %s", e)
 
 
 @dataclass
