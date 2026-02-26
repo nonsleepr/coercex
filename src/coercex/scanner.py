@@ -358,7 +358,7 @@ class Scanner:
                 # Listener active: real path with correlation token
                 listener = self._listener
                 assert listener is not None
-                token, future = listener.create_token()
+                token, future = listener.create_token(target_ip=target)
 
                 port = self._unc_port(transport)
                 path = build_unc_path(
