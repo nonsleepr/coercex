@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -369,6 +370,11 @@ class Scanner:
                     path_style=path_style,
                 )
 
+                # Record wall-clock BEFORE trigger so we can check for
+                # callbacks that arrived during this attempt's window
+                # even if FIFO assigned them to the wrong token.
+                t_before = time.monotonic()
+
                 result = await trigger_method(pool, target, method, binding, path)
 
                 # Wait for callback if trigger indicated vulnerability
@@ -384,7 +390,18 @@ class Scanner:
                         result.source_ip = callback.source_ip
                         result.result = TriggerResult.VULNERABLE
                     except asyncio.TimeoutError:
-                        pass
+                        # Token-based correlation failed (FIFO race).
+                        # Fall back to timestamp check: did ANY callback
+                        # arrive from this target since we fired?
+                        if listener.has_callback_since(target, t_before):
+                            result.callback_received = True
+                            result.result = TriggerResult.VULNERABLE
+                            log.debug(
+                                "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
+                                target,
+                                method.protocol_short,
+                                method.function_name,
+                            )
                 else:
                     listener.cancel_token(token)
 

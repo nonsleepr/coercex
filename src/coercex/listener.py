@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 
@@ -105,6 +106,13 @@ class AsyncListener:
         # token → target_ip (reverse index for cleanup)
         self._token_to_ip: dict[str, str] = {}
 
+        # Timestamp-based callback log per source IP.
+        # Records time.monotonic() for every callback regardless of
+        # token extraction success.  Used by has_callback_since() as a
+        # fallback when FIFO token correlation assigns callbacks to the
+        # wrong attempt.
+        self._ip_callback_times: dict[str, list[float]] = {}
+
         self._callbacks: list[AuthCallback] = []
         self._http_server: asyncio.Server | None = None
         self._smb_server: asyncio.Server | None = None
@@ -154,6 +162,7 @@ class AsyncListener:
         self._pending.clear()
         self._pending_by_ip.clear()
         self._token_to_ip.clear()
+        self._ip_callback_times.clear()
 
     def create_token(
         self, target_ip: str = ""
@@ -262,6 +271,9 @@ class AsyncListener:
             src_ip = peername[0] if peername else "unknown"
             src_port = peername[1] if peername else 0
 
+            # Record callback timestamp for has_callback_since() fallback
+            self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
+
             # Read the HTTP request line
             request_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
             if not request_line:
@@ -327,6 +339,9 @@ class AsyncListener:
             peername = writer.get_extra_info("peername")
             src_ip = peername[0] if peername else "unknown"
             src_port = peername[1] if peername else 0
+
+            # Record callback timestamp for has_callback_since() fallback
+            self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
 
             log.debug("SMB connection from %s:%d", src_ip, src_port)
 
@@ -434,6 +449,23 @@ class AsyncListener:
         # All tokens for this IP were already resolved/cancelled
         del self._pending_by_ip[src_ip]
         log.info("SMB callback from %s — all pending tokens already resolved", src_ip)
+
+    def has_callback_since(self, target: str, since: float) -> bool:
+        """Check if any callback arrived from *target* at or after *since*.
+
+        *target* can be a hostname or IP — it is resolved to an IP before
+        comparison.  *since* should be a ``time.monotonic()`` timestamp
+        recorded **before** the coercion trigger was fired.
+
+        This is a fallback for the FIFO race condition: even when FIFO
+        assigns the callback to the wrong token, the raw timestamp log
+        proves the target did call back during this attempt's window.
+        """
+        resolved = _resolve_to_ip(target)
+        timestamps = self._ip_callback_times.get(resolved)
+        if not timestamps:
+            return False
+        return any(t >= since for t in timestamps)
 
     @property
     def callbacks(self) -> list[AuthCallback]:
