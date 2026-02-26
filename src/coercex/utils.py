@@ -52,6 +52,7 @@ class TriggerResult(Enum):
     CONNECT_ERROR = "connect_error"  # Can't connect to target
     UNKNOWN_ERROR = "unknown_error"  # Unexpected error
     TIMEOUT = "timeout"  # Connection timed out
+    SENT = "sent"  # Trigger fired (coerce mode — no classification)
 
 
 @dataclass
@@ -150,6 +151,7 @@ class ScanStats:
     not_available: int = 0
     connect_errors: int = 0
     timeouts: int = 0
+    sent: int = 0
     results: list[ScanResult] = field(default_factory=list)
 
     def add(self, result: ScanResult) -> None:
@@ -168,6 +170,8 @@ class ScanStats:
                 self.connect_errors += 1
             case TriggerResult.TIMEOUT:
                 self.timeouts += 1
+            case TriggerResult.SENT:
+                self.sent += 1
 
 
 def build_unc_path(

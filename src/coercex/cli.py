@@ -152,6 +152,7 @@ _STATUS_STYLE = {
     TriggerResult.CONNECT_ERROR: ("bold red", "[!]"),
     TriggerResult.TIMEOUT: ("magenta", "[T]"),
     TriggerResult.UNKNOWN_ERROR: ("dim red", "[?]"),
+    TriggerResult.SENT: ("cyan", "[>]"),
 }
 
 
@@ -175,7 +176,8 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
         results = [
             r
             for r in results
-            if r.result in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE)
+            if r.result
+            in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE, TriggerResult.SENT)
         ]
 
     for r in results:
@@ -202,7 +204,8 @@ def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
         results = [
             r
             for r in results
-            if r.result in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE)
+            if r.result
+            in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE, TriggerResult.SENT)
         ]
 
     data = {
@@ -210,6 +213,7 @@ def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
             "total_targets": stats.total_targets,
             "total_attempts": stats.total_attempts,
             "vulnerable": stats.vulnerable,
+            "sent": stats.sent,
             "accessible": stats.accessible,
             "access_denied": stats.access_denied,
             "not_available": stats.not_available,
@@ -242,6 +246,7 @@ def _print_summary(stats: ScanStats) -> None:
         f"[bold]Targets:[/]        {stats.total_targets}",
         f"[bold]Attempts:[/]       {stats.total_attempts}",
         f"[bold green]Vulnerable:[/]    {stats.vulnerable}",
+        f"[cyan]Sent:[/]          {stats.sent}",
         f"[yellow]Accessible:[/]    {stats.accessible}",
         f"[red]Access Denied:[/] {stats.access_denied}",
         f"[dim]Not Available:[/] {stats.not_available}",

