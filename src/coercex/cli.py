@@ -1,9 +1,8 @@
 """Command-line interface for coercex.
 
-Modern Typer-based CLI with Rich output.  Three subcommands:
+Modern Typer-based CLI with Rich output.  Two subcommands:
   scan   - detect vulnerable methods (all path styles, optional listener)
   coerce - trigger coercion with listener (specific or all methods)
-  relay  - coercion + NTLM relay (all path styles through relay servers)
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ out_console = Console()  # stdout for results
 # ── Typer app ───────────────────────────────────────────────────────
 app = typer.Typer(
     name="coercex",
-    help="Async NTLM authentication coercion scanner & relay tool",
+    help="Async NTLM authentication coercion scanner",
     no_args_is_help=True,
     rich_markup_mode="rich",
     add_completion=False,
@@ -55,7 +54,7 @@ def _main(
         ),
     ] = False,
 ) -> None:
-    """Async NTLM authentication coercion scanner & relay tool."""
+    """Async NTLM authentication coercion scanner."""
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -168,6 +167,8 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
     table.add_column("Protocol", style="blue")
     table.add_column("Method")
     table.add_column("Pipe", style="dim")
+    table.add_column("Transport", style="magenta")
+    table.add_column("Path Style", style="dim")
     table.add_column("Result")
     table.add_column("Callback")
 
@@ -188,6 +189,8 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
             r.protocol,
             r.method,
             r.pipe,
+            r.transport or "",
+            r.path_style or "",
             f"[{style}]{sym} {r.result.value}[/]",
             cb,
         )
@@ -227,6 +230,8 @@ def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
                 "method": r.method,
                 "pipe": r.pipe,
                 "uuid": r.uuid,
+                "transport": r.transport,
+                "path_style": r.path_style,
                 "result": r.result.value,
                 "callback_received": r.callback_received,
                 "source_ip": r.source_ip,
@@ -374,6 +379,18 @@ CallbackTimeoutOpt = Annotated[
     float,
     typer.Option("--callback-timeout", help="Seconds to wait for callback per attempt"),
 ]
+RedirectOpt = Annotated[
+    bool,
+    typer.Option(
+        "--redirect/--no-redirect",
+        help=(
+            "Redirect standard ports (445/80) to listener ports via "
+            "iptables (Linux) or pydivert (Windows).  Allows standard SMB "
+            "UNC paths even when binding on non-standard ports.  "
+            "Requires root/admin."
+        ),
+    ),
+]
 
 
 # ── scan ────────────────────────────────────────────────────────────
@@ -388,6 +405,7 @@ def scan(
     smb_port: SmbPortOpt = 445,
     transport: TransportOpt = None,
     callback_timeout: CallbackTimeoutOpt = 3.0,
+    redirect: RedirectOpt = False,
     username: UsernameOpt = "",
     password: PasswordOpt = "",
     domain: DomainOpt = "",
@@ -437,6 +455,7 @@ def scan(
         http_port=http_port,
         smb_port=smb_port,
         callback_timeout=callback_timeout,
+        redirect=redirect,
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
@@ -465,6 +484,7 @@ def coerce(
     http_port: HttpPortOpt = 80,
     smb_port: SmbPortOpt = 445,
     transport: TransportOpt = None,
+    redirect: RedirectOpt = False,
     username: UsernameOpt = "",
     password: PasswordOpt = "",
     domain: DomainOpt = "",
@@ -514,127 +534,10 @@ def coerce(
         http_port=http_port,
         smb_port=smb_port,
         transport=_parse_transports(transport),
+        redirect=redirect,
         concurrency=concurrency,
         timeout=timeout,
         verbose=verbose,
-    )
-
-    stats = asyncio.run(_run(config))
-    _output_results(stats, json_output, verbose, output_file or "")
-
-
-# ── relay ───────────────────────────────────────────────────────────
-
-
-@app.command()
-def relay(
-    target: TargetOpt = None,
-    targets_file: TargetsFileOpt = None,
-    listener: ListenerOpt = None,
-    relay_to: Annotated[
-        list[str],
-        typer.Option(
-            "--relay-to",
-            help="Relay target URL(s): ldap://dc01, http://cas/certsrv/, smb://fs01",
-        ),
-    ] = ...,  # type: ignore[assignment]
-    http_port: HttpPortOpt = 80,
-    smb_port: SmbPortOpt = 445,
-    transport: TransportOpt = None,
-    # Attack options
-    adcs: Annotated[
-        bool, typer.Option("--adcs", help="Enable AD CS relay attack")
-    ] = False,
-    template: Annotated[
-        str, typer.Option("--template", help="AD CS template name")
-    ] = "",
-    altname: Annotated[
-        str, typer.Option("--altname", help="Subject Alternative Name for ESC1/ESC6")
-    ] = "",
-    shadow_credentials: Annotated[
-        bool,
-        typer.Option("--shadow-credentials", help="Enable Shadow Credentials attack"),
-    ] = False,
-    shadow_target: Annotated[
-        str,
-        typer.Option("--shadow-target", help="Target account for Shadow Credentials"),
-    ] = "",
-    delegate_access: Annotated[
-        bool,
-        typer.Option("--delegate-access", help="Enable RBCD delegation access attack"),
-    ] = False,
-    escalate_user: Annotated[
-        str,
-        typer.Option("--escalate-user", help="User to escalate via LDAP ACL attack"),
-    ] = "",
-    socks: Annotated[
-        bool, typer.Option("--socks", help="Start SOCKS proxy for relayed sessions")
-    ] = False,
-    lootdir: Annotated[
-        str, typer.Option("--lootdir", help="Directory to store loot")
-    ] = "",
-    # Shared options
-    username: UsernameOpt = "",
-    password: PasswordOpt = "",
-    domain: DomainOpt = "",
-    hashes: HashesOpt = "",
-    aes_key: AesKeyOpt = "",
-    kerberos: KerberosOpt = False,
-    dc_host: DcHostOpt = "",
-    ccache: CcacheOpt = "",
-    protocols: ProtocolsOpt = None,
-    methods: MethodsOpt = None,
-    pipes: PipesOpt = None,
-    concurrency: ConcurrencyOpt = 50,
-    timeout: TimeoutOpt = 5,
-    verbose: VerboseOpt = False,
-    json_output: JsonOpt = False,
-    output_file: OutputFileOpt = None,
-    debug: DebugOpt = False,
-) -> None:
-    """Trigger coercion and relay captured NTLM auth to target services.
-
-    Starts impacket relay servers (HTTP + SMB on all interfaces),
-    then tries all path styles per method.
-
-    --listener is optional; if omitted the local IP is auto-detected.
-    Use --methods / --pipes / --protocols to target specific vulnerabilities.
-    """
-    _setup_logging(debug)
-
-    targets = _parse_targets(target, targets_file)
-    if not targets:
-        console.print("[bold red]Error:[/] No targets specified. Use -t or -T.")
-        raise typer.Exit(1)
-
-    creds = _build_creds(
-        username, password, domain, hashes, aes_key, kerberos, dc_host, ccache
-    )
-
-    config = ScanConfig(
-        targets=targets,
-        mode=Mode.RELAY,
-        protocols=protocols,
-        methods_filter=methods,
-        pipes_filter=pipes,
-        creds=creds,
-        listener_host=listener or "",
-        http_port=http_port,
-        smb_port=smb_port,
-        transport=_parse_transports(transport),
-        concurrency=concurrency,
-        timeout=timeout,
-        verbose=verbose,
-        relay_targets=relay_to,
-        relay_adcs=adcs,
-        relay_adcs_template=template,
-        relay_altname=altname,
-        relay_shadow_credentials=shadow_credentials,
-        relay_shadow_target=shadow_target,
-        relay_delegate_access=delegate_access,
-        relay_escalate_user=escalate_user,
-        relay_socks=socks,
-        relay_lootdir=lootdir,
     )
 
     stats = asyncio.run(_run(config))

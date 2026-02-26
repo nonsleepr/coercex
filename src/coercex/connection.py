@@ -164,14 +164,16 @@ async def trigger_method(
         # Run the trigger function in a thread (it's synchronous impacket code)
         await asyncio.to_thread(method.trigger_fn, dce, path, target)
 
-        # If we get here without exception, the call succeeded
+        # If we get here without exception, the call succeeded —
+        # the method processed our path.  Mark as ACCESSIBLE; only
+        # the scanner upgrades to VULNERABLE on confirmed callback.
         return ScanResult(
             target=target,
             protocol=method.protocol_short,
             method=method.function_name,
             pipe=binding.pipe,
             uuid=binding.uuid,
-            result=TriggerResult.VULNERABLE,
+            result=TriggerResult.ACCESSIBLE,
         )
 
     except Exception as e:

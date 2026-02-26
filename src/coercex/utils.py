@@ -134,6 +134,8 @@ class ScanResult:
     pipe: str
     uuid: str
     result: TriggerResult
+    transport: str = ""  # "smb" or "http"
+    path_style: str = ""  # e.g. "share_file", "bare"
     error: str = ""
     callback_received: bool = False
     source_ip: str = ""
@@ -187,8 +189,9 @@ def build_unc_path(
         listener: Attacker IP/hostname.
         token: Unique correlation token.
         transport: SMB or HTTP (WebDAV).
-        port: Listener port (used for WebDAV @port syntax).
-        path_style: One of 'share', 'share_file', 'share_trailing', 'bare', 'unc_device'.
+        port: Listener port (used for WebDAV @port syntax, and for
+              non-standard SMB ports which are automatically promoted
+              to WebDAV format since SMB UNC paths always go to 445).
 
     Returns:
         UNC path string.
@@ -197,6 +200,13 @@ def build_unc_path(
         # WebDAV format: \\host@port\path
         port_str = f"@{port}" if port else "@80"
         host = f"{listener}{port_str}"
+    elif port is not None and port != 445:
+        # Non-standard SMB port: must use WebDAV @port format because
+        # standard SMB UNC paths (\\host\share) always connect to 445.
+        host = f"{listener}@{port}"
+        log.debug(
+            "Non-standard SMB port %d: using WebDAV @port format in UNC path", port
+        )
     else:
         host = listener
 
@@ -216,8 +226,10 @@ def build_unc_path(
             return f"\\\\{host}\\{token}\x00"
 
 
-# Well-known error codes that indicate the method is accessible/vulnerable
-VULN_ERROR_CODES = {
+# Error codes that indicate the method processed our path (target tried
+# to reach the UNC path).  Classified as ACCESSIBLE; only a confirmed
+# callback upgrades to VULNERABLE.
+ACCESSIBLE_ERROR_CODES = {
     0x00000000,  # SUCCESS
     0x00000035,  # ERROR_BAD_NETPATH (tried to reach our UNC path)
     0x0000003A,  # ERROR_BAD_NET_NAME
@@ -259,8 +271,8 @@ def classify_error(error: Exception) -> TriggerResult:
 
         if isinstance(error, DCERPCException):
             code = error.error_code & 0xFFFFFFFF
-            if code in VULN_ERROR_CODES:
-                return TriggerResult.VULNERABLE
+            if code in ACCESSIBLE_ERROR_CODES:
+                return TriggerResult.ACCESSIBLE
             if code in ACCESS_DENIED_CODES:
                 return TriggerResult.ACCESS_DENIED
             if code in NOT_AVAILABLE_CODES:
@@ -276,16 +288,16 @@ def classify_error(error: Exception) -> TriggerResult:
     if "access_denied" in err_str or "access denied" in err_str:
         return TriggerResult.ACCESS_DENIED
 
-    # Bad netpath = vulnerable (it tried to reach our UNC path)
+    # Bad netpath = accessible (it tried to reach our UNC path)
     if (
         "bad_netpath" in err_str
         or "bad_net_name" in err_str
         or "bad netpath" in err_str
     ):
-        return TriggerResult.VULNERABLE
+        return TriggerResult.ACCESSIBLE
 
     # If the error message contains object_name_not_found, it processed the path
     if "object_name_not_found" in err_str:
-        return TriggerResult.VULNERABLE
+        return TriggerResult.ACCESSIBLE
 
     return TriggerResult.UNKNOWN_ERROR

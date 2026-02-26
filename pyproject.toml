@@ -9,6 +9,9 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
+[project.optional-dependencies]
+windows = ["pydivert>=2.1.0"]
+
 [project.scripts]
 coercex = "coercex.cli:main"
 
