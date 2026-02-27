@@ -8,8 +8,13 @@ response packets using impacket structs.
 from __future__ import annotations
 
 import asyncio
+import calendar
+import logging
 import os
 import struct
+import time
+
+log = logging.getLogger("coercex.listener.smb2")
 
 _SMB2_MAGIC = b"\xfeSMB"
 _SMB1_MAGIC = b"\xffSMB"
@@ -73,13 +78,22 @@ def build_negotiate_response(msg_id: int, challenge_token: bytes) -> bytes:
     body["MaxTransactSize"] = 65536
     body["MaxReadSize"] = 65536
     body["MaxWriteSize"] = 65536
+    # SystemTime and ServerStartTime must be valid FILETIMEs -- a value
+    # of 0 (Jan 1 1601) causes Windows clients to reject the response.
+    from impacket.smb import POSIXtoFT
+
+    now_ft = POSIXtoFT(calendar.timegm(time.gmtime()))
+    body["SystemTime"] = now_ft
+    body["ServerStartTime"] = now_ft
     body["SecurityBufferOffset"] = 0x80  # standard offset
     body["SecurityBufferLength"] = len(challenge_token)
     body["Buffer"] = challenge_token
 
     resp["Data"] = body
 
-    return resp.getData()
+    pkt_bytes = resp.getData()
+    log.debug("NEGOTIATE response (%d bytes): %s", len(pkt_bytes), pkt_bytes.hex())
+    return pkt_bytes
 
 
 def build_session_setup_response(
@@ -112,7 +126,14 @@ def build_session_setup_response(
 
     resp["Data"] = body
 
-    return resp.getData()
+    pkt_bytes = resp.getData()
+    log.debug(
+        "SESSION_SETUP response (status=0x%08x, %d bytes): %s",
+        status,
+        len(pkt_bytes),
+        pkt_bytes.hex(),
+    )
+    return pkt_bytes
 
 
 def build_tree_connect_response(msg_id: int, session_id: int, tree_id: int) -> bytes:
@@ -140,4 +161,11 @@ def build_tree_connect_response(msg_id: int, session_id: int, tree_id: int) -> b
 
     resp["Data"] = body
 
-    return resp.getData()
+    pkt_bytes = resp.getData()
+    log.debug(
+        "TREE_CONNECT response (tree_id=%d, %d bytes): %s",
+        tree_id,
+        len(pkt_bytes),
+        pkt_bytes.hex(),
+    )
+    return pkt_bytes

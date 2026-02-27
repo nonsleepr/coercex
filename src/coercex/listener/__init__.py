@@ -420,6 +420,9 @@ class AsyncListener:
             # Step 1: Receive NEGOTIATE
             raw = await recv_netbios(reader, timeout=5.0)
             if len(raw) < 4:
+                log.debug(
+                    "SMB NEGOTIATE from %s too short (%d bytes)", src_ip, len(raw)
+                )
                 return
 
             # Determine SMB version from magic bytes
@@ -427,7 +430,12 @@ class AsyncListener:
             if magic == _SMB1_MAGIC:
                 # SMB1 NEGOTIATE -- respond with SMB2 NEGOTIATE response
                 # to upgrade the client to SMB2
-                log.debug("SMB1 NEGOTIATE from %s, upgrading to SMB2", src_ip)
+                log.debug(
+                    "SMB1 NEGOTIATE from %s (%d bytes), upgrading to SMB2",
+                    src_ip,
+                    len(raw),
+                )
+                log.debug("  raw: %s", raw.hex())
                 msg_id = 0
             elif magic == _SMB2_MAGIC:
                 # Parse the SMB2 message ID for proper response sequencing
@@ -435,6 +443,13 @@ class AsyncListener:
 
                 pkt = SMB2Packet(raw)
                 msg_id = pkt["MessageID"]
+                log.debug(
+                    "SMB2 NEGOTIATE from %s (msg_id=%d, %d bytes)",
+                    src_ip,
+                    msg_id,
+                    len(raw),
+                )
+                log.debug("  raw: %s", raw.hex())
             else:
                 log.debug(
                     "Unknown SMB magic %s from %s, falling back to IP",
@@ -446,12 +461,25 @@ class AsyncListener:
 
             # Step 2: Send NEGOTIATE response (SPNEGO w/ NTLMSSP)
             spnego_init = build_spnego_negotiate_token()
+            log.debug(
+                "SPNEGO NegTokenInit (%d bytes): %s",
+                len(spnego_init),
+                spnego_init.hex(),
+            )
             neg_resp = build_negotiate_response(msg_id, spnego_init)
             send_netbios(writer, neg_resp)
             await writer.drain()
+            log.debug("Sent NEGOTIATE response to %s (%d bytes)", src_ip, len(neg_resp))
 
             # Step 3: Receive SESSION_SETUP #1 (NTLM Type 1)
             raw = await recv_netbios(reader, timeout=5.0)
+            log.debug(
+                "SESSION_SETUP #1 from %s (%d bytes, magic=%s)",
+                src_ip,
+                len(raw),
+                raw[:4].hex() if len(raw) >= 4 else "short",
+            )
+            log.debug("  raw: %s", raw.hex())
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
                 return
@@ -483,7 +511,11 @@ class AsyncListener:
 
             ntlm_type1 = extract_spnego_ntlm_token(sec_blob)
             if ntlm_type1[:7] != b"NTLMSSP":
-                log.debug("No NTLMSSP in SESSION_SETUP #1 from %s", src_ip)
+                log.debug(
+                    "No NTLMSSP in SESSION_SETUP #1 from %s (got %s)",
+                    src_ip,
+                    ntlm_type1[:16].hex(),
+                )
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
                 return
 
@@ -493,10 +525,21 @@ class AsyncListener:
             type1 = NTLMAuthNegotiate()
             type1.fromString(ntlm_type1)
             negotiate_flags = type1["flags"]
+            log.debug(
+                "NTLM Type 1 from %s: flags=0x%08x (%d bytes)",
+                src_ip,
+                negotiate_flags,
+                len(ntlm_type1),
+            )
 
             # Step 4: Send SESSION_SETUP response (NTLM Type 2)
             ntlm_challenge_blob = build_ntlm_challenge(
                 negotiate_flags, server_challenge
+            )
+            log.debug(
+                "NTLM Type 2 challenge (%d bytes): %s",
+                len(ntlm_challenge_blob),
+                ntlm_challenge_blob.hex(),
             )
             spnego_challenge = wrap_ntlm_in_spnego_challenge(ntlm_challenge_blob)
             sess_resp = build_session_setup_response(
@@ -507,9 +550,21 @@ class AsyncListener:
             )
             send_netbios(writer, sess_resp)
             await writer.drain()
+            log.debug(
+                "Sent SESSION_SETUP response (Type 2) to %s (%d bytes)",
+                src_ip,
+                len(sess_resp),
+            )
 
             # Step 5: Receive SESSION_SETUP #2 (NTLM Type 3)
             raw = await recv_netbios(reader, timeout=5.0)
+            log.debug(
+                "SESSION_SETUP #2 from %s (%d bytes, magic=%s)",
+                src_ip,
+                len(raw),
+                raw[:4].hex() if len(raw) >= 4 else "short",
+            )
+            log.debug("  raw: %s", raw.hex())
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
                 return
@@ -536,6 +591,14 @@ class AsyncListener:
             # Parse Type 3 and extract credentials + hash
             username, domain, workstation, ntlmv2_hash = parse_ntlm_type3(
                 ntlm_type3_raw, server_challenge
+            )
+            log.debug(
+                "NTLM Type 3 parsed from %s: user=%s domain=%s ws=%s hash_len=%d",
+                src_ip,
+                username,
+                domain,
+                workstation,
+                len(ntlmv2_hash),
             )
             log.info(
                 "NTLM auth from %s: %s\\%s (%s)",
@@ -577,6 +640,13 @@ class AsyncListener:
 
             # Step 7: Receive TREE_CONNECT
             raw = await recv_netbios(reader, timeout=5.0)
+            log.debug(
+                "TREE_CONNECT from %s (%d bytes, magic=%s)",
+                src_ip,
+                len(raw),
+                raw[:4].hex() if len(raw) >= 4 else "short",
+            )
+            log.debug("  raw: %s", raw.hex())
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
                 # No TREE_CONNECT -- still resolve by IP + metadata
                 log.debug("No TREE_CONNECT from %s, using IP fallback", src_ip)
@@ -659,8 +729,17 @@ class AsyncListener:
             else:
                 self._resolve_by_ip(src_ip, callback)
 
-        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
-            log.debug("SMB handshake timeout/incomplete from %s:%d", src_ip, src_port)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+            log.debug(
+                "SMB handshake timeout/incomplete from %s:%d: %s "
+                "(accumulated: user=%s domain=%s ws=%s)",
+                src_ip,
+                src_port,
+                exc,
+                username,
+                domain,
+                workstation,
+            )
             # Partial handshake -- still resolve by IP if we can
             callback = AuthCallback(
                 token="",
@@ -675,7 +754,16 @@ class AsyncListener:
             )
             self._resolve_by_ip(src_ip, callback)
         except (ConnectionError, OSError) as exc:
-            log.debug("SMB connection error from %s:%d: %s", src_ip, src_port, exc)
+            log.debug(
+                "SMB connection error from %s:%d: %s "
+                "(accumulated: user=%s domain=%s ws=%s)",
+                src_ip,
+                src_port,
+                exc,
+                username,
+                domain,
+                workstation,
+            )
             # Partial handshake -- still resolve by IP with whatever we have
             callback = AuthCallback(
                 token="",
