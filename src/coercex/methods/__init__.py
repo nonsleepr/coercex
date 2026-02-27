@@ -32,16 +32,37 @@ ALL_PROTOCOLS = [
 def _matches_any_pattern(name: str, patterns: list[str]) -> bool:
     """Check if name matches any of the given glob/regex patterns.
 
-    Tries fnmatch (glob) first. If the pattern looks like a regex
-    (contains regex-specific chars), also tries re.search.
+    Matching rules (checked in order):
+    1. **Exact match** (case-insensitive) — if the pattern contains no
+       glob wildcards (``*``, ``?``, ``[``) and no regex metacharacters,
+       it must match the full method name exactly.
+    2. **Glob match** — if the pattern contains ``*``, ``?``, or ``[``,
+       use ``fnmatch`` (anchored: must match the *whole* name).
+    3. **Regex match** — if the pattern contains regex-specific chars
+       (``+``, ``{``, ``(``, ``^``, ``$``, ``|``, ``\\``), use
+       ``re.fullmatch`` so the pattern must match the *entire* name.
     """
+    _GLOB_CHARS = set("*?[")
+    _REGEX_CHARS = set(r"+{(^$|\\.")
+
     for pat in patterns:
-        # Glob match (case-insensitive)
-        if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(name.lower(), pat.lower()):
-            return True
-        # Regex match
+        has_glob = bool(_GLOB_CHARS & set(pat))
+        has_regex = bool(_REGEX_CHARS & set(pat))
+
+        if not has_glob and not has_regex:
+            # Plain string — exact match only
+            if name.lower() == pat.lower():
+                return True
+            continue
+
+        if has_glob:
+            # Glob match (fnmatch is already anchored — matches whole string)
+            if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(name.lower(), pat.lower()):
+                return True
+
+        # Regex match — use fullmatch to prevent substring matching
         try:
-            if re.search(pat, name, re.IGNORECASE):
+            if re.fullmatch(pat, name, re.IGNORECASE):
                 return True
         except re.error:
             pass
