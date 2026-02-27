@@ -308,17 +308,16 @@ class AsyncListener:
             src_port = peername[1] if peername else 0
 
             # Record callback timestamp for get_callback_since() fallback.
-            # Also store a preliminary AuthCallback so the fallback can
-            # return *something* even if the full handshake hasn't finished.
+            # Always overwrite so each new connection supersedes any stale
+            # preliminary from a prior attempt.
             self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
-            if src_ip not in self._ip_latest_callback:
-                self._ip_latest_callback[src_ip] = AuthCallback(
-                    token="",
-                    source_ip=src_ip,
-                    source_port=src_port,
-                    timestamp=datetime.now(timezone.utc),
-                    transport="http",
-                )
+            self._ip_latest_callback[src_ip] = AuthCallback(
+                token="",
+                source_ip=src_ip,
+                source_port=src_port,
+                timestamp=datetime.now(timezone.utc),
+                transport="http",
+            )
 
             # Read the HTTP request line
             request_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -394,14 +393,17 @@ class AsyncListener:
         # Also store a preliminary AuthCallback so the fallback can
         # return *something* even if the full handshake hasn't finished.
         self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
-        if src_ip not in self._ip_latest_callback:
-            self._ip_latest_callback[src_ip] = AuthCallback(
-                token="",
-                source_ip=src_ip,
-                source_port=src_port,
-                timestamp=datetime.now(timezone.utc),
-                transport="smb",
-            )
+        # Always store a preliminary callback so get_callback_since() can
+        # return *something* even if the full handshake hasn't finished.
+        # Overwrite unconditionally -- a new connection supersedes any stale
+        # preliminary from a prior attempt.
+        self._ip_latest_callback[src_ip] = AuthCallback(
+            token="",
+            source_ip=src_ip,
+            source_port=src_port,
+            timestamp=datetime.now(timezone.utc),
+            transport="smb",
+        )
 
         log.debug("SMB connection from %s:%d", src_ip, src_port)
 
@@ -544,6 +546,23 @@ class AsyncListener:
             )
             if ntlmv2_hash:
                 log.info("Net-NTLMv2 hash: %s", ntlmv2_hash)
+
+            # Eagerly update the IP-based fallback callback with NTLM
+            # metadata *before* TREE_CONNECT.  If the scanner's
+            # callback_timeout fires while we're still waiting for
+            # TREE_CONNECT, get_callback_since() will already have the
+            # full credentials instead of the empty preliminary.
+            self._ip_latest_callback[src_ip] = AuthCallback(
+                token="",
+                source_ip=src_ip,
+                source_port=src_port,
+                timestamp=datetime.now(timezone.utc),
+                transport="smb",
+                username=username,
+                domain=domain,
+                workstation=workstation,
+                ntlmv2_hash=ntlmv2_hash,
+            )
 
             # Step 6: Send SESSION_SETUP success
             accept_blob = wrap_spnego_accept_completed()
