@@ -139,6 +139,8 @@ class ScanResult:
     error: str = ""
     callback_received: bool = False
     source_ip: str = ""
+    auth_user: str = ""  # DOMAIN\username from NTLM Type 3
+    ntlmv2_hash: str = ""  # Net-NTLMv2 hash in John/Hashcat format
 
 
 @dataclass

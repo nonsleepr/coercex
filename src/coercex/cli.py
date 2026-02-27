@@ -171,6 +171,7 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
     table.add_column("Path Style", style="dim")
     table.add_column("Result")
     table.add_column("Callback")
+    table.add_column("Auth User", style="magenta")
 
     results = stats.results
     if not show_all:
@@ -193,6 +194,7 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
             r.path_style or "",
             f"[{style}]{sym} {r.result.value}[/]",
             cb,
+            r.auth_user or "",
         )
 
     return table
@@ -235,6 +237,8 @@ def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
                 "result": r.result.value,
                 "callback_received": r.callback_received,
                 "source_ip": r.source_ip,
+                "auth_user": r.auth_user,
+                "ntlmv2_hash": r.ntlmv2_hash,
                 "error": r.error,
             }
             for r in results

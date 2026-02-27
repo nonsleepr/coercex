@@ -389,6 +389,15 @@ class Scanner:
                         result.callback_received = True
                         result.source_ip = callback.source_ip
                         result.result = TriggerResult.VULNERABLE
+                        # Propagate NTLM metadata from SMB2 handshake
+                        if callback.ntlmv2_hash:
+                            result.ntlmv2_hash = callback.ntlmv2_hash
+                        if callback.username:
+                            result.auth_user = (
+                                f"{callback.domain}\\{callback.username}"
+                                if callback.domain
+                                else callback.username
+                            )
                     except asyncio.TimeoutError:
                         # Token-based correlation failed (FIFO race).
                         # Fall back to timestamp check: did ANY callback
@@ -423,8 +432,11 @@ class Scanner:
             style, sym = _STATUS_STYLE.get(result.result, ("dim red", "[?]"))
             cb = " [bold green](callback!)[/]" if result.callback_received else ""
             tr = f" [dim]({result.transport})[/]" if result.transport else ""
+            auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
             self.console.print(
                 f"[{style}]{sym}[/] {result.target} | "
                 f"[blue]{result.protocol}[/]::{result.method} "
-                f"via [dim]{result.pipe}[/]{tr}{cb}"
+                f"via [dim]{result.pipe}[/]{tr}{cb}{auth}"
             )
+            if result.ntlmv2_hash:
+                self.console.print(f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}")
