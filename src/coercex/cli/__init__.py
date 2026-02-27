@@ -175,7 +175,7 @@ def scan(
     http_port: HttpPortOpt = 80,
     smb_port: SmbPortOpt = 445,
     transport: TransportOpt = None,
-    callback_timeout: CallbackTimeoutOpt = 3.0,
+    callback_timeout: CallbackTimeoutOpt = 5.0,
     redirect: RedirectOpt = False,
     username: UsernameOpt = "",
     password: PasswordOpt = "",

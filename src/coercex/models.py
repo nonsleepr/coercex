@@ -181,7 +181,7 @@ class ScanConfig:
     )
     concurrency: int = 50
     timeout: int = 5
-    callback_timeout: float = 3.0
+    callback_timeout: float = 5.0
     redirect: bool = False
     verbose: bool = False
 

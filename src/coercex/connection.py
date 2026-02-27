@@ -32,6 +32,7 @@ class DCERPCPool:
         self._timeout = timeout
         self._sessions: dict[tuple[str, str, str], Any] = {}
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._exec_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._lock = asyncio.Lock()  # For creating per-key locks
 
     async def get_session(self, target: str, binding: PipeBinding) -> Any:
@@ -130,8 +131,28 @@ class DCERPCPool:
         """Execute a single coercion method trigger.
 
         Connects via the pool, calls the trigger function in a thread,
-        and classifies the result.
+        and classifies the result.  Uses a per-session execution lock to
+        prevent concurrent trigger calls from corrupting a shared DCE
+        connection (impacket transports are not thread-safe).
         """
+        key = (target, binding.pipe, binding.uuid)
+
+        # Get or create per-key execution lock
+        async with self._lock:
+            if key not in self._exec_locks:
+                self._exec_locks[key] = asyncio.Lock()
+
+        async with self._exec_locks[key]:
+            return await self._trigger_locked(target, method, binding, path)
+
+    async def _trigger_locked(
+        self,
+        target: str,
+        method: CoercionMethod,
+        binding: PipeBinding,
+        path: str,
+    ) -> ScanResult:
+        """Execute a trigger with the session lock already held."""
         try:
             dce = await self.get_session(target, binding)
         except Exception as e:

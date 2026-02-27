@@ -169,6 +169,7 @@ class Scanner:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
         allowed = self.config.transport
         tasks: list[asyncio.Task[None]] = []
+        scan_start = time.monotonic()
 
         for target in self.config.targets:
             for method in methods:
@@ -194,6 +195,11 @@ class Scanner:
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Drain period: keep the listener running while ongoing handshakes
+        # complete, then sweep results to upgrade ACCESSIBLE → VULNERABLE
+        # and enrich VULNERABLE results that are missing auth_user.
+        await self._drain_callbacks(scan_start)
+
     # ── COERCE: targeted single-path triggers (no local listener) ──
 
     async def _run_coerce(self, methods: list[CoercionMethod]) -> None:
@@ -210,6 +216,72 @@ class Scanner:
                         tasks.append(task)
 
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ── DRAIN: wait for late callbacks after all tasks complete ──────
+
+    async def _drain_callbacks(self, scan_start: float) -> None:
+        """Wait for late callbacks and enrich results.
+
+        After all ``_attempt()`` tasks complete, ongoing SMB handshakes
+        may still be running in the listener.  The per-attempt
+        ``callback_timeout`` may have expired while the handshake was
+        mid-flight (e.g. Type 3 NTLM not yet parsed).
+
+        This method:
+        1. Sleeps ``callback_timeout`` seconds so handshakes can finish.
+        2. Sweeps ACCESSIBLE results → upgrades to VULNERABLE if a
+           callback arrived from that target.
+        3. Sweeps VULNERABLE results with empty ``auth_user`` → enriches
+           them with NTLM credentials from the completed handshake.
+        """
+        if not self._listener:
+            return
+
+        needs_drain = any(
+            r.result == TriggerResult.ACCESSIBLE
+            or (r.result == TriggerResult.VULNERABLE and not r.auth_user)
+            for r in self.stats.results
+        )
+        if not needs_drain:
+            return
+
+        log.debug(
+            "Drain: waiting %ss for late callbacks / handshake completion",
+            self.config.callback_timeout,
+        )
+        self.console.print(
+            f"[dim]Waiting {self.config.callback_timeout:.0f}s for late callbacks…[/]"
+        )
+        await asyncio.sleep(self.config.callback_timeout)
+
+        listener = self._listener
+        for result in self.stats.results:
+            if result.result == TriggerResult.ACCESSIBLE:
+                cb = listener.get_callback_since(result.target, scan_start)
+                if cb is not None:
+                    result.result = TriggerResult.VULNERABLE
+                    result.callback_received = True
+                    result.source_ip = cb.source_ip
+                    if cb.username:
+                        result.auth_user = (
+                            f"{cb.domain}\\{cb.username}" if cb.domain else cb.username
+                        )
+                    if cb.ntlmv2_hash:
+                        result.ntlmv2_hash = cb.ntlmv2_hash
+                    self.stats.vulnerable += 1
+                    self.stats.accessible -= 1
+                    self._emit(result)
+
+            elif result.result == TriggerResult.VULNERABLE and not result.auth_user:
+                # Callback arrived but handshake wasn't done yet.
+                # Now the handshake may have completed; re-check.
+                cb = listener.get_callback_since(result.target, scan_start)
+                if cb is not None and cb.username:
+                    result.auth_user = (
+                        f"{cb.domain}\\{cb.username}" if cb.domain else cb.username
+                    )
+                    if cb.ntlmv2_hash and not result.ntlmv2_hash:
+                        result.ntlmv2_hash = cb.ntlmv2_hash
 
     async def _attempt_coerce(
         self,
