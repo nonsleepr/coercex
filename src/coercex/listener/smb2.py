@@ -60,6 +60,7 @@ def build_negotiate_response(msg_id: int, challenge_token: bytes) -> bytes:
     resp["Flags"] = SMB2_FLAGS_SERVER_TO_REDIR
     resp["Command"] = _SMB2_NEGOTIATE
     resp["MessageID"] = msg_id
+    resp["CreditRequestResponse"] = 1  # MUST grant ≥1 credit
     resp["SessionID"] = 0
     resp["TreeID"] = 0
     resp["Status"] = _STATUS_SUCCESS
@@ -98,6 +99,7 @@ def build_session_setup_response(
     resp["Flags"] = SMB2_FLAGS_SERVER_TO_REDIR
     resp["Command"] = _SMB2_SESSION_SETUP
     resp["MessageID"] = msg_id
+    resp["CreditRequestResponse"] = 1  # MUST grant ≥1 credit
     resp["SessionID"] = session_id
     resp["TreeID"] = 0
     resp["Status"] = status
@@ -125,6 +127,7 @@ def build_tree_connect_response(msg_id: int, session_id: int, tree_id: int) -> b
     resp["Flags"] = SMB2_FLAGS_SERVER_TO_REDIR
     resp["Command"] = _SMB2_TREE_CONNECT
     resp["MessageID"] = msg_id
+    resp["CreditRequestResponse"] = 1  # MUST grant ≥1 credit
     resp["SessionID"] = session_id
     resp["TreeID"] = tree_id
     resp["Status"] = _STATUS_SUCCESS

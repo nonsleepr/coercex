@@ -132,6 +132,16 @@ class Scanner:
                 )
             enable_http = Transport.HTTP in self.config.transport
             enable_smb = Transport.SMB in self.config.transport
+            # When port redirect is active, always start the SMB listener:
+            # targets commonly connect back via SMB port 445 even when the
+            # trigger uses an HTTP/WebDAV UNC path, and the redirect already
+            # forwards 445 to our SMB port.
+            if self._redirect_active and not enable_smb:
+                enable_smb = True
+                log.debug(
+                    "Enabling SMB listener (redirect active; targets may "
+                    "call back via SMB even for HTTP triggers)"
+                )
             self._listener = AsyncListener(
                 host="0.0.0.0",
                 http_port=self.config.http_port,

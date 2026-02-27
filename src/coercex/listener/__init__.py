@@ -676,6 +676,19 @@ class AsyncListener:
             self._resolve_by_ip(src_ip, callback)
         except (ConnectionError, OSError) as exc:
             log.debug("SMB connection error from %s:%d: %s", src_ip, src_port, exc)
+            # Partial handshake -- still resolve by IP with whatever we have
+            callback = AuthCallback(
+                token="",
+                source_ip=src_ip,
+                source_port=src_port,
+                timestamp=datetime.now(timezone.utc),
+                transport="smb",
+                username=username,
+                domain=domain,
+                workstation=workstation,
+                ntlmv2_hash=ntlmv2_hash,
+            )
+            self._resolve_by_ip(src_ip, callback)
         except Exception as exc:
             log.warning(
                 "SMB handshake error from %s:%d: %s",
