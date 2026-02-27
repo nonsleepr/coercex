@@ -9,7 +9,7 @@ from impacket.dcerpc.v5.dtypes import DWORD, WSTR
 from impacket.dcerpc.v5.ndr import NDRCALL
 
 from coercex.methods.base import CoercionMethod, PipeBinding
-from coercex.utils import random_string
+from coercex.net import random_string
 
 DFSNM_UUID = "4fc742e0-4a10-11cf-8273-00aa004ae673"
 

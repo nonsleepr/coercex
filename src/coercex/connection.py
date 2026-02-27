@@ -14,13 +14,9 @@ from typing import Any
 from impacket.dcerpc.v5 import transport as imp_transport
 from impacket.uuid import uuidtup_to_bin
 
+from coercex.errors import classify_error
 from coercex.methods.base import CoercionMethod, PipeBinding
-from coercex.utils import (
-    Credentials,
-    ScanResult,
-    TriggerResult,
-    classify_error,
-)
+from coercex.models import Credentials, ScanResult, TriggerResult
 
 log = logging.getLogger("coercex.connection")
 
@@ -124,71 +120,73 @@ class DCERPCPool:
             except Exception:
                 pass
 
+    async def trigger_method(
+        self,
+        target: str,
+        method: CoercionMethod,
+        binding: PipeBinding,
+        path: str,
+    ) -> ScanResult:
+        """Execute a single coercion method trigger.
 
-async def trigger_method(
-    pool: DCERPCPool,
-    target: str,
-    method: CoercionMethod,
-    binding: PipeBinding,
-    path: str,
-) -> ScanResult:
-    """Execute a single coercion method trigger.
+        Connects via the pool, calls the trigger function in a thread,
+        and classifies the result.
+        """
+        try:
+            dce = await self.get_session(target, binding)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "timed out" in err_str or "timeout" in err_str:
+                result_type = TriggerResult.TIMEOUT
+            elif "access_denied" in err_str or "access denied" in err_str:
+                result_type = TriggerResult.ACCESS_DENIED
+            elif "connection refused" in err_str:
+                result_type = TriggerResult.CONNECT_ERROR
+            else:
+                result_type = TriggerResult.CONNECT_ERROR
 
-    Connects via the pool, calls the trigger function in a thread,
-    and classifies the result.
-    """
-    try:
-        dce = await pool.get_session(target, binding)
-    except Exception as e:
-        err_str = str(e).lower()
-        if "timed out" in err_str or "timeout" in err_str:
-            result_type = TriggerResult.TIMEOUT
-        elif "access_denied" in err_str or "access denied" in err_str:
-            result_type = TriggerResult.ACCESS_DENIED
-        elif "connection refused" in err_str:
-            result_type = TriggerResult.CONNECT_ERROR
-        else:
-            result_type = TriggerResult.CONNECT_ERROR
+            return ScanResult(
+                target=target,
+                protocol=method.protocol_short,
+                method=method.function_name,
+                pipe=binding.pipe,
+                uuid=binding.uuid,
+                result=result_type,
+                error=str(e),
+            )
 
-        return ScanResult(
-            target=target,
-            protocol=method.protocol_short,
-            method=method.function_name,
-            pipe=binding.pipe,
-            uuid=binding.uuid,
-            result=result_type,
-            error=str(e),
-        )
+        try:
+            # Run the trigger function in a thread (it's synchronous impacket code)
+            trigger_fn = method.trigger_fn
+            if trigger_fn is None:
+                raise ValueError(f"No trigger function for {method.function_name}")
+            await asyncio.to_thread(trigger_fn, dce, path, target)
 
-    try:
-        # Run the trigger function in a thread (it's synchronous impacket code)
-        await asyncio.to_thread(method.trigger_fn, dce, path, target)
+            # If we get here without exception, the call succeeded --
+            # the method processed our path.  Mark as ACCESSIBLE; only
+            # the scanner upgrades to VULNERABLE on confirmed callback.
+            return ScanResult(
+                target=target,
+                protocol=method.protocol_short,
+                method=method.function_name,
+                pipe=binding.pipe,
+                uuid=binding.uuid,
+                result=TriggerResult.ACCESSIBLE,
+            )
 
-        # If we get here without exception, the call succeeded —
-        # the method processed our path.  Mark as ACCESSIBLE; only
-        # the scanner upgrades to VULNERABLE on confirmed callback.
-        return ScanResult(
-            target=target,
-            protocol=method.protocol_short,
-            method=method.function_name,
-            pipe=binding.pipe,
-            uuid=binding.uuid,
-            result=TriggerResult.ACCESSIBLE,
-        )
+        except Exception as e:
+            result_type = classify_error(e)
 
-    except Exception as e:
-        result_type = classify_error(e)
+            # If the connection is broken, remove from pool
+            if result_type in (TriggerResult.CONNECT_ERROR, TriggerResult.TIMEOUT):
+                await self.close_session(target, binding)
 
-        # If the connection is broken, remove from pool
-        if result_type in (TriggerResult.CONNECT_ERROR, TriggerResult.TIMEOUT):
-            await pool.close_session(target, binding)
-
-        return ScanResult(
-            target=target,
-            protocol=method.protocol_short,
-            method=method.function_name,
-            pipe=binding.pipe,
-            uuid=binding.uuid,
-            result=result_type,
-            error=str(e),
-        )
+            return ScanResult(
+                target=target,
+                protocol=method.protocol_short,
+                method=method.function_name,
+                pipe=binding.pipe,
+                uuid=binding.uuid,
+                result=result_type,
+                error=str(e),
+            )

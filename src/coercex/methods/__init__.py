@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 import re
 
-from coercex.methods.base import CoercionMethod, PipeBinding
+from coercex.methods.base import CoercionMethod, PipeBinding, TriggerFn
 from coercex.methods.ms_efsr import get_methods as _efsr
 from coercex.methods.ms_rprn import get_methods as _rprn
 from coercex.methods.ms_dfsnm import get_methods as _dfsnm
@@ -144,6 +144,7 @@ def group_by_pipe(
 __all__ = [
     "CoercionMethod",
     "PipeBinding",
+    "TriggerFn",
     "get_all_methods",
     "group_by_pipe",
     "ALL_PROTOCOLS",

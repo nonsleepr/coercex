@@ -1,305 +1,36 @@
-"""Utility functions for coercex."""
+"""Backward-compatible re-exports from split modules.
+
+This module previously contained all utility types, helpers, and error
+classification in a single file.  The code has been split into focused
+modules:
+
+- :mod:`coercex.models`  -- Credentials, ScanResult, ScanStats, Transport, TriggerResult
+- :mod:`coercex.errors`  -- classify_error(), error code sets
+- :mod:`coercex.unc`     -- build_unc_path()
+- :mod:`coercex.net`     -- get_local_ip(), random_string()
+
+All names are re-exported here so existing ``from coercex.utils import ...``
+statements continue to work.
+"""
 
 from __future__ import annotations
 
-import logging
-import os
-import random
-import socket
-import string
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any
-
-log = logging.getLogger("coercex.utils")
-
-
-def get_local_ip() -> str:
-    """Auto-detect the local IP by opening a UDP socket to a public address.
-
-    This doesn't actually send traffic -- it just lets the OS pick the
-    outbound interface so we can read the local address.
-    """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("10.255.255.255", 1))
-            return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-
-
-def random_string(length: int = 8) -> str:
-    """Generate a random alphanumeric string."""
-    return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
-
-
-class Transport(Enum):
-    """UNC path transport type."""
-
-    SMB = auto()
-    HTTP = auto()  # WebDAV
-
-
-class TriggerResult(Enum):
-    """Result of a coercion trigger attempt."""
-
-    VULNERABLE = (
-        "vulnerable"  # Method triggered, callback received or error indicates it worked
-    )
-    ACCESSIBLE = "accessible"  # Method accessible but couldn't confirm coercion
-    ACCESS_DENIED = "access_denied"  # Can't bind / access denied
-    NOT_AVAILABLE = "not_available"  # Service/pipe not available
-    CONNECT_ERROR = "connect_error"  # Can't connect to target
-    UNKNOWN_ERROR = "unknown_error"  # Unexpected error
-    TIMEOUT = "timeout"  # Connection timed out
-    SENT = "sent"  # Trigger fired (coerce mode — no classification)
-
-
-@dataclass
-class Credentials:
-    """Authentication credentials."""
-
-    username: str = ""
-    password: str = ""
-    domain: str = ""
-    hashes: str = ""  # LMHASH:NTHASH
-    aes_key: str = ""
-    do_kerberos: bool = False
-    dc_host: str = ""
-    ccache: str = ""  # Path to Kerberos ccache file (or empty to use KRB5CCNAME)
-
-    # Cached TGT/TGS loaded from ccache (populated by load_ccache())
-    _tgt: dict[str, Any] | None = field(default=None, repr=False)
-    _tgs: dict[str, Any] | None = field(default=None, repr=False)
-
-    @property
-    def lmhash(self) -> str:
-        if self.hashes and ":" in self.hashes:
-            return self.hashes.split(":")[0]
-        return ""
-
-    @property
-    def nthash(self) -> str:
-        if self.hashes and ":" in self.hashes:
-            return self.hashes.split(":")[1]
-        return ""
-
-    def load_ccache(self, target_name: str = "") -> None:
-        """Load TGT/TGS from a ccache file.
-
-        Sets do_kerberos=True and populates _tgt/_tgs for use by the
-        connection pool. If self.ccache is set, it overrides KRB5CCNAME.
-
-        Args:
-            target_name: SPN target name for TGS lookup (e.g. 'cifs/dc01.corp.local').
-        """
-        if self.ccache:
-            os.environ["KRB5CCNAME"] = self.ccache
-            log.info("Using ccache file: %s", self.ccache)
-
-        ccache_path = os.environ.get("KRB5CCNAME", "")
-        if not ccache_path:
-            log.warning("No ccache path set (--ccache or KRB5CCNAME)")
-            return
-
-        try:
-            from impacket.krb5.ccache import CCache
-
-            domain, username, tgt, tgs = CCache.parseFile(
-                self.domain, self.username, target_name
-            )
-            if domain and not self.domain:
-                self.domain = domain
-            if username and not self.username:
-                self.username = username
-            if tgt:
-                self._tgt = tgt
-                log.info("Loaded TGT from ccache for %s@%s", self.username, self.domain)
-            if tgs:
-                self._tgs = tgs
-                log.info("Loaded TGS from ccache for target %s", target_name)
-
-            self.do_kerberos = True
-        except Exception as e:
-            log.error("Failed to load ccache: %s", e)
-
-
-@dataclass
-class ScanResult:
-    """Result of scanning a single method on a single target."""
-
-    target: str
-    protocol: str
-    method: str
-    pipe: str
-    uuid: str
-    result: TriggerResult
-    transport: str = ""  # "smb" or "http"
-    path_style: str = ""  # e.g. "share_file", "bare"
-    error: str = ""
-    callback_received: bool = False
-    source_ip: str = ""
-    auth_user: str = ""  # DOMAIN\username from NTLM Type 3
-    ntlmv2_hash: str = ""  # Net-NTLMv2 hash in John/Hashcat format
-
-
-@dataclass
-class ScanStats:
-    """Aggregate scan statistics."""
-
-    total_targets: int = 0
-    total_attempts: int = 0
-    vulnerable: int = 0
-    accessible: int = 0
-    access_denied: int = 0
-    not_available: int = 0
-    connect_errors: int = 0
-    timeouts: int = 0
-    sent: int = 0
-    results: list[ScanResult] = field(default_factory=list)
-
-    def add(self, result: ScanResult) -> None:
-        self.results.append(result)
-        self.total_attempts += 1
-        match result.result:
-            case TriggerResult.VULNERABLE:
-                self.vulnerable += 1
-            case TriggerResult.ACCESSIBLE:
-                self.accessible += 1
-            case TriggerResult.ACCESS_DENIED:
-                self.access_denied += 1
-            case TriggerResult.NOT_AVAILABLE:
-                self.not_available += 1
-            case TriggerResult.CONNECT_ERROR:
-                self.connect_errors += 1
-            case TriggerResult.TIMEOUT:
-                self.timeouts += 1
-            case TriggerResult.SENT:
-                self.sent += 1
-
-
-def build_unc_path(
-    listener: str,
-    token: str,
-    transport: Transport = Transport.SMB,
-    port: int | None = None,
-    path_style: str = "share",
-) -> str:
-    """Build a UNC path for coercion.
-
-    Args:
-        listener: Attacker IP/hostname.
-        token: Unique correlation token.
-        transport: SMB or HTTP (WebDAV).
-        port: Listener port (used for WebDAV @port syntax, and for
-              non-standard SMB ports which are automatically promoted
-              to WebDAV format since SMB UNC paths always go to 445).
-
-    Returns:
-        UNC path string.
-    """
-    if transport == Transport.HTTP:
-        # WebDAV format: \\host@port\path
-        port_str = f"@{port}" if port else "@80"
-        host = f"{listener}{port_str}"
-    elif port is not None and port != 445:
-        # Non-standard SMB port: must use WebDAV @port format because
-        # standard SMB UNC paths (\\host\share) always connect to 445.
-        host = f"{listener}@{port}"
-        log.debug(
-            "Non-standard SMB port %d: using WebDAV @port format in UNC path", port
-        )
-    else:
-        host = listener
-
-    match path_style:
-        case "share_file":
-            return f"\\\\{host}\\{token}\\file.txt\x00"
-        case "share_trailing":
-            return f"\\\\{host}\\{token}\\\x00"
-        case "share":
-            return f"\\\\{host}\\{token}\x00"
-        case "bare":
-            return f"\\\\{host}\x00"
-        case "unc_device":
-            # \\?\UNC\host\share format used by MS-EVEN
-            return f"\\??\\UNC\\{host}\\{token}\\aa"
-        case _:
-            return f"\\\\{host}\\{token}\x00"
-
-
-# Error codes that indicate the method processed our path (target tried
-# to reach the UNC path).  Classified as ACCESSIBLE; only a confirmed
-# callback upgrades to VULNERABLE.
-ACCESSIBLE_ERROR_CODES = {
-    0x00000000,  # SUCCESS
-    0x00000035,  # ERROR_BAD_NETPATH (tried to reach our UNC path)
-    0x0000003A,  # ERROR_BAD_NET_NAME
-    0x00000043,  # ERROR_BAD_NET_NAME
-    0x000006D5,  # ERROR_BAD_NET_NAME variant
-    0x00000057,  # ERROR_INVALID_PARAMETER (still processed the call)
-    0x000006BA,  # RPC_S_SERVER_UNAVAILABLE (tried to call back)
-    0x000006BE,  # RPC_S_CALL_FAILED
-    0x000006BF,  # RPC_S_CALL_FAILED_DNE
-}
-
-ACCESS_DENIED_CODES = {
-    0x00000005,  # ERROR_ACCESS_DENIED
-    0x00000721,  # ERROR_ACCESS_DENIED variant
-    0x000006AD,  # RPC_S_UNKNOWN_AUTHN_TYPE
-}
-
-NOT_AVAILABLE_CODES = {
-    0x000006D9,  # EPT_S_NOT_REGISTERED
-    0x000006E4,  # RPC_S_CANNOT_SUPPORT
-}
-
-
-def classify_error(error: Exception) -> TriggerResult:
-    """Classify a DCERPC error into a TriggerResult."""
-    err_str = str(error).lower()
-
-    # Check for connection/timeout errors
-    if any(s in err_str for s in ["timed out", "timeout", "connection refused"]):
-        return TriggerResult.TIMEOUT
-    if any(
-        s in err_str for s in ["connection reset", "connection aborted", "broken pipe"]
-    ):
-        return TriggerResult.CONNECT_ERROR
-
-    # Try to extract error code
-    try:
-        from impacket.dcerpc.v5.rpcrt import DCERPCException
-
-        if isinstance(error, DCERPCException):
-            code = error.error_code & 0xFFFFFFFF
-            if code in ACCESSIBLE_ERROR_CODES:
-                return TriggerResult.ACCESSIBLE
-            if code in ACCESS_DENIED_CODES:
-                return TriggerResult.ACCESS_DENIED
-            if code in NOT_AVAILABLE_CODES:
-                return TriggerResult.NOT_AVAILABLE
-    except ImportError:
-        pass
-
-    # STATUS_PIPE_DISCONNECTED or similar = patched/not available
-    if "status_pipe_disconnected" in err_str or "pipe_disconnected" in err_str:
-        return TriggerResult.NOT_AVAILABLE
-
-    # Access denied patterns
-    if "access_denied" in err_str or "access denied" in err_str:
-        return TriggerResult.ACCESS_DENIED
-
-    # Bad netpath = accessible (it tried to reach our UNC path)
-    if (
-        "bad_netpath" in err_str
-        or "bad_net_name" in err_str
-        or "bad netpath" in err_str
-    ):
-        return TriggerResult.ACCESSIBLE
-
-    # If the error message contains object_name_not_found, it processed the path
-    if "object_name_not_found" in err_str:
-        return TriggerResult.ACCESSIBLE
-
-    return TriggerResult.UNKNOWN_ERROR
+# Re-export everything from the new modules
+from coercex.errors import (
+    ACCESSIBLE_ERROR_CODES as ACCESSIBLE_ERROR_CODES,
+    ACCESS_DENIED_CODES as ACCESS_DENIED_CODES,
+    NOT_AVAILABLE_CODES as NOT_AVAILABLE_CODES,
+    classify_error as classify_error,
+)
+from coercex.models import (
+    Credentials as Credentials,
+    ScanResult as ScanResult,
+    ScanStats as ScanStats,
+    Transport as Transport,
+    TriggerResult as TriggerResult,
+)
+from coercex.net import (
+    get_local_ip as get_local_ip,
+    random_string as random_string,
+)
+from coercex.unc import build_unc_path as build_unc_path

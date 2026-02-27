@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    pass
+
+@runtime_checkable
+class TriggerFn(Protocol):
+    """Signature for RPC trigger functions.
+
+    Args:
+        dce: Impacket DCERPC transport session (untyped -- no stubs).
+        path: UNC path pointing at the attacker-controlled listener.
+        target: Target hostname or IP being coerced.
+    """
+
+    def __call__(self, dce: Any, path: str, target: str) -> None: ...
 
 
 @dataclass
@@ -45,9 +55,8 @@ class CoercionMethod:
     # and path_style is one of: share_file, share_trailing, share, bare, unc_device
     path_styles: list[tuple[str, str]] = field(default_factory=list)
 
-    # The trigger function: takes (dce_session, path, target) -> error or None
-    # This is set per-method to contain the actual RPC call logic
-    trigger_fn: Any = None
+    # The trigger function: (dce, path, target) -> None; raises on error
+    trigger_fn: TriggerFn | None = None
 
     # Optional: requires a pre-step (e.g., RPRN needs hRpcOpenPrinter first)
     needs_target_handle: bool = False

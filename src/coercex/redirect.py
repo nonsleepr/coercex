@@ -48,9 +48,6 @@ class PortRedirector(ABC):
         """Remove all redirect rules added by this instance."""
 
 
-# ── Linux: iptables ─────────────────────────────────────────────────
-
-
 class IptablesRedirector(PortRedirector):
     """Linux ``iptables`` NAT PREROUTING REDIRECT rules.
 
@@ -143,9 +140,6 @@ class IptablesRedirector(PortRedirector):
         self._rules.clear()
 
 
-# ── Windows: pydivert ───────────────────────────────────────────────
-
-
 class PydivertRedirector(PortRedirector):
     """Windows port redirection using pydivert (WinDivert kernel driver).
 
@@ -200,9 +194,6 @@ class PydivertRedirector(PortRedirector):
         self._handles.clear()
         self._threads.clear()
         log.info("Closed all pydivert handles")
-
-
-# ── Factory ─────────────────────────────────────────────────────────
 
 
 def create_redirector() -> PortRedirector:

