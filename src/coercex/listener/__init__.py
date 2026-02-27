@@ -307,8 +307,18 @@ class AsyncListener:
             src_ip = peername[0] if peername else "unknown"
             src_port = peername[1] if peername else 0
 
-            # Record callback timestamp for get_callback_since() fallback
+            # Record callback timestamp for get_callback_since() fallback.
+            # Also store a preliminary AuthCallback so the fallback can
+            # return *something* even if the full handshake hasn't finished.
             self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
+            if src_ip not in self._ip_latest_callback:
+                self._ip_latest_callback[src_ip] = AuthCallback(
+                    token="",
+                    source_ip=src_ip,
+                    source_port=src_port,
+                    timestamp=datetime.now(timezone.utc),
+                    transport="http",
+                )
 
             # Read the HTTP request line
             request_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -380,8 +390,18 @@ class AsyncListener:
         src_ip = peername[0] if peername else "unknown"
         src_port = peername[1] if peername else 0
 
-        # Record callback timestamp for get_callback_since() fallback
+        # Record callback timestamp for get_callback_since() fallback.
+        # Also store a preliminary AuthCallback so the fallback can
+        # return *something* even if the full handshake hasn't finished.
         self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
+        if src_ip not in self._ip_latest_callback:
+            self._ip_latest_callback[src_ip] = AuthCallback(
+                token="",
+                source_ip=src_ip,
+                source_port=src_port,
+                timestamp=datetime.now(timezone.utc),
+                transport="smb",
+            )
 
         log.debug("SMB connection from %s:%d", src_ip, src_port)
 
