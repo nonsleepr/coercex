@@ -24,9 +24,9 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
     table.add_column("Method")
     table.add_column("Pipe", style="dim")
     table.add_column("Transport", style="magenta")
-    table.add_column("Path Style", style="dim")
-    table.add_column("Result")
-    table.add_column("Callback")
+    if show_all:
+        table.add_column("Path Style", style="dim")
+    table.add_column("Status")
     table.add_column("Auth User", style="magenta")
 
     results = stats.results
@@ -40,18 +40,18 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
 
     for r in results:
         style, sym = STATUS_STYLE.get(r.result, ("dim red", "[?]"))
-        cb = "[bold green]YES[/]" if r.callback_received else ""
-        table.add_row(
+        row: list[str] = [
             r.target,
             r.protocol,
             r.method,
             r.pipe,
             r.transport or "",
-            r.path_style or "",
-            f"[{style}]{sym} {r.result.value}[/]",
-            cb,
-            r.auth_user or "",
-        )
+        ]
+        if show_all:
+            row.append(r.path_style or "")
+        row.append(f"[{style}]{sym} {r.result.value}[/]")
+        row.append(r.auth_user or "")
+        table.add_row(*row)
 
     return table
 

@@ -130,28 +130,23 @@ class Scanner:
                     f"[dim]Auto-detected listener IP: "
                     f"[bold]{self.config.listener_host}[/][/]"
                 )
+            enable_http = Transport.HTTP in self.config.transport
+            enable_smb = Transport.SMB in self.config.transport
             self._listener = AsyncListener(
                 host="0.0.0.0",
                 http_port=self.config.http_port,
                 smb_port=self.config.smb_port,
-                enable_http=True,
-                enable_smb=True,
+                enable_http=enable_http,
+                enable_smb=enable_smb,
             )
             await self._listener.start()
+            listener_parts: list[str] = []
+            if enable_http:
+                listener_parts.append(f"http={self.config.http_port}")
+            if enable_smb:
+                listener_parts.append(f"smb={self.config.smb_port}")
             self.console.print(
-                f"[green]Listener started[/] "
-                f"(http={self.config.http_port}, smb={self.config.smb_port})"
-            )
-
-        # ── Coerce mode: NO listener — targets point at external relay ─
-        if self.config.mode == Mode.COERCE:
-            if not self.config.has_listener:
-                log.error("Coerce mode requires --listener (IP of your running relay)")
-                return self.stats
-            self.console.print(
-                f"[yellow]Coerce mode[/] — triggers point at "
-                f"[bold]{self.config.listener_host}[/] "
-                f"(no local listener; assumes external relay is running)"
+                f"[green]Listener started[/] ({', '.join(listener_parts)})"
             )
 
         try:
@@ -355,9 +350,19 @@ class Scanner:
                         # Token-based correlation failed (FIFO race).
                         # Fall back to timestamp check: did ANY callback
                         # arrive from this target since we fired?
-                        if listener.has_callback_since(target, t_before):
+                        fallback = listener.get_callback_since(target, t_before)
+                        if fallback is not None:
                             result.callback_received = True
                             result.result = TriggerResult.VULNERABLE
+                            result.source_ip = fallback.source_ip
+                            if fallback.ntlmv2_hash:
+                                result.ntlmv2_hash = fallback.ntlmv2_hash
+                            if fallback.username:
+                                result.auth_user = (
+                                    f"{fallback.domain}\\{fallback.username}"
+                                    if fallback.domain
+                                    else fallback.username
+                                )
                             log.debug(
                                 "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
                                 target,
