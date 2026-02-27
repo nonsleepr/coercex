@@ -23,8 +23,17 @@ def build_ntlm_challenge(negotiate_flags: int, server_challenge: bytes) -> bytes
     """Build an NTLM Type 2 (CHALLENGE) message.
 
     Returns the raw NTLMSSP blob (not SPNEGO-wrapped).
+
+    Mirrors impacket's smbserver.py approach: only ``domain_name`` and
+    ``TargetInfoFields`` are variable payloads.  The structure does NOT
+    have a ``host_name`` payload -- hostname lives inside TargetInfo
+    AV_PAIRS only.
     """
     from impacket import ntlm
+
+    import calendar
+    import struct
+    import time
 
     challenge = ntlm.NTLMAuthChallenge()
 
@@ -50,28 +59,44 @@ def build_ntlm_challenge(negotiate_flags: int, server_challenge: bytes) -> bytes
     domain = "COERCEX".encode("utf-16-le")
     hostname = "SCANNER".encode("utf-16-le")
 
-    # Build target info (AV_PAIRS)
+    # Build target info (AV_PAIRS) -- include AV_TIME like impacket does
     av_pairs = ntlm.AV_PAIRS()
     av_pairs[ntlm.NTLMSSP_AV_HOSTNAME] = hostname
     av_pairs[ntlm.NTLMSSP_AV_DOMAINNAME] = domain
     av_pairs[ntlm.NTLMSSP_AV_DNS_HOSTNAME] = "scanner.coercex.local".encode("utf-16-le")
     av_pairs[ntlm.NTLMSSP_AV_DNS_DOMAINNAME] = "coercex.local".encode("utf-16-le")
-    av_pairs_data = av_pairs.getData()
+    av_pairs[ntlm.NTLMSSP_AV_TIME] = struct.pack(
+        "<q", 116444736000000000 + calendar.timegm(time.gmtime()) * 10000000
+    )
 
+    # NTLMAuthChallenge structure layout (with NTLMSSP_NEGOTIATE_VERSION):
+    #   Fixed header: 40 bytes (up to Reserved)
+    #   + TargetInfoFields descriptor: 8 bytes
+    #   + Version: 8 bytes
+    #   = 56 bytes total fixed header
+    # Variable payloads (in order):
+    #   domain_name (= TargetName)
+    #   TargetInfoFields (= AV_PAIRS)
+    #
+    # NOTE: NTLMAuthChallenge has NO host_name field -- do NOT set it.
+    # Setting host_offset or host_name has no effect on serialization but
+    # would corrupt TargetInfoFields_offset if used in the calculation.
     challenge["domain_name"] = domain
-    challenge["host_name"] = hostname
+    challenge["domain_len"] = len(domain)
+    challenge["domain_max_len"] = len(domain)
+    challenge["domain_offset"] = 56  # 40 + 8 (TargetInfo desc) + 8 (Version)
+
+    av_pairs_data = av_pairs.getData()
     challenge["TargetInfoFields"] = av_pairs_data
     challenge["TargetInfoFields_len"] = len(av_pairs_data)
     challenge["TargetInfoFields_max_len"] = len(av_pairs_data)
+    challenge["TargetInfoFields_offset"] = 56 + len(
+        domain
+    )  # immediately after domain_name
 
-    # Version (8 bytes, use dummy)
+    # Version (8 bytes) -- dummy, matches impacket smbserver
     challenge["Version"] = b"\xff" * 8
     challenge["VersionLen"] = 8
-
-    # Offsets: fixed header is 56 bytes, then domain_name, then target_info
-    challenge["domain_offset"] = 56
-    challenge["host_offset"] = 56 + len(domain)
-    challenge["TargetInfoFields_offset"] = 56 + len(domain) + len(hostname)
 
     return challenge.getData()
 
