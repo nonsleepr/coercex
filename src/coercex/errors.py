@@ -78,4 +78,10 @@ def classify_error(error: Exception) -> TriggerResult:
     if "object_name_not_found" in err_str:
         return TriggerResult.ACCESSIBLE
 
+    # Log unknown errors for debugging
+    import logging
+
+    log = logging.getLogger("coercex.errors")
+    log.warning("Unknown error classification: %s", str(error)[:200])
+
     return TriggerResult.UNKNOWN_ERROR

