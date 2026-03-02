@@ -37,9 +37,6 @@ def build_unc_path(
         # Non-standard SMB port: must use WebDAV @port format because
         # standard SMB UNC paths (\\host\share) always connect to 445.
         host = f"{listener}@{port}"
-        log.debug(
-            "Non-standard SMB port %d: using WebDAV @port format in UNC path", port
-        )
     else:
         host = listener
 

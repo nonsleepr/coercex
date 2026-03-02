@@ -137,9 +137,7 @@ def parse_ntlm_type3(
 
     log = logging.getLogger("coercex.listener.ntlm")
 
-    log.debug("parse_ntlm_type3: raw_token length=%d", len(raw_token))
-    if log.isEnabledFor(logging.DEBUG):
-        log.debug("parse_ntlm_type3: raw_token hex=%s", raw_token.hex())
+    log.debug("parse_ntlm_type3: parsing %d-byte token", len(raw_token))
 
     auth = ntlm.NTLMAuthChallengeResponse()
     auth.fromString(raw_token)
@@ -192,11 +190,7 @@ def extract_spnego_ntlm_token(raw: bytes) -> bytes:
 
     log = logging.getLogger("coercex.listener.ntlm")
 
-    log.debug("extract_spnego_ntlm_token: raw length=%d", len(raw))
-    if log.isEnabledFor(logging.DEBUG):
-        log.debug(
-            "extract_spnego_ntlm_token: raw hex (first 64 bytes)=%s", raw[:64].hex()
-        )
+    log.debug("extract_spnego_ntlm_token: processing %d-byte blob", len(raw))
 
     # Try NegTokenResp first (SESSION_SETUP #2, wraps Type 3)
     try:
@@ -204,12 +198,12 @@ def extract_spnego_ntlm_token(raw: bytes) -> bytes:
         token = resp["ResponseToken"]
         if token and len(token) > 0:
             log.debug(
-                "extract_spnego_ntlm_token: extracted from NegTokenResp, length=%d",
+                "extract_spnego_ntlm_token: extracted %d bytes from NegTokenResp",
                 len(token),
             )
             return bytes(token)
     except Exception as e:
-        log.debug("extract_spnego_ntlm_token: NegTokenResp parse failed: %s", e)
+        log.debug("extract_spnego_ntlm_token: NegTokenResp failed: %s", e)
 
     # Try NegTokenInit (SESSION_SETUP #1, wraps Type 1)
     try:
@@ -217,19 +211,16 @@ def extract_spnego_ntlm_token(raw: bytes) -> bytes:
         token = init["MechToken"]
         if token and len(token) > 0:
             log.debug(
-                "extract_spnego_ntlm_token: extracted from NegTokenInit, length=%d",
+                "extract_spnego_ntlm_token: extracted %d bytes from NegTokenInit",
                 len(token),
             )
             return bytes(token)
     except Exception as e:
-        log.debug("extract_spnego_ntlm_token: NegTokenInit parse failed: %s", e)
+        log.debug("extract_spnego_ntlm_token: NegTokenInit failed: %s", e)
 
     # Raw NTLMSSP (no SPNEGO wrapper)
     if raw[:7] == b"NTLMSSP":
-        log.debug(
-            "extract_spnego_ntlm_token: raw NTLMSSP (no SPNEGO wrapper), length=%d",
-            len(raw),
-        )
+        log.debug("extract_spnego_ntlm_token: raw NTLMSSP, %d bytes", len(raw))
         return raw
 
     log.warning("extract_spnego_ntlm_token: no NTLM token found in %d bytes", len(raw))
