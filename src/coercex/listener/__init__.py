@@ -618,6 +618,19 @@ class AsyncListener:
                 self._ip_fallback_callback(src_ip, src_port, ntlm_type3_raw)
                 return
 
+            # Check NTLMSSP signature and message type
+            if ntlm_type3_raw[:8] == b"NTLMSSP\x00":
+                msg_type = int.from_bytes(ntlm_type3_raw[8:12], "little")
+                if msg_type != 3:
+                    log.warning(
+                        "SESSION_SETUP from %s: expected NTLM Type 3 (AUTHENTICATE), got Type %d — "
+                        "client sent wrong message type (likely protocol confusion or race)",
+                        src_ip,
+                        msg_type,
+                    )
+                    self._ip_fallback_callback(src_ip, src_port, ntlm_type3_raw)
+                    return
+
             # Parse Type 3 and extract credentials + hash
             username, domain, workstation, ntlmv2_hash = parse_ntlm_type3(
                 ntlm_type3_raw, server_challenge
