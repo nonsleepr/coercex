@@ -165,7 +165,6 @@ class AsyncListener:
                     self.host,
                     self.http_port,
                 )
-                log.info("HTTP listener started on %s:%d", self.host, self.http_port)
             except OSError as e:
                 log.warning(
                     "Could not start HTTP listener on port %d: %s", self.http_port, e
@@ -178,7 +177,6 @@ class AsyncListener:
                     self.host,
                     self.smb_port,
                 )
-                log.info("SMB listener started on %s:%d", self.host, self.smb_port)
             except OSError as e:
                 log.warning(
                     "Could not start SMB listener on port %d: %s", self.smb_port, e
