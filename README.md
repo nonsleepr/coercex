@@ -132,12 +132,12 @@ Two solutions:
 1. **WebDAV format** (automatic fallback): UNC paths become `\\host@4445\share`.
    Requires the WebClient service on the target (often disabled by default).
 
-2. **Port redirect** (`--redirect`): Uses iptables (Linux) or pydivert (Windows)
-   to NAT standard ports to your listener ports at the kernel level. UNC paths
-   stay in standard format. Requires root/admin.
+2. **Port redirect** (`--redirect`, Windows only): Uses pydivert to NAT
+   standard ports to your listener ports at the kernel level. UNC paths stay
+   in standard format. Requires admin privileges.
 
 ```bash
-# Linux: iptables NAT rules (445->4445, 80->8080)
+# Windows only: pydivert NAT rules (445->4445, 80->8080)
 coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
 
 # If redirect fails, coercex falls back to WebDAV @port format with a warning

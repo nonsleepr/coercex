@@ -56,7 +56,7 @@ src/coercex/
   connection.py   DCERPCPool, trigger_method(), async connection pooling
   listener.py     SMB2 + HTTP listener, NTLM token correlation, hash capture
   scanner.py      Scan/coerce orchestrator, semaphore-bounded async pipeline
-  redirect.py     Port redirect: iptables (Linux), pydivert (Windows)
+  redirect.py     Port redirect: pydivert (Windows only)
   utils.py        TriggerResult enum, ScanResult, dataclasses, classify_error()
   methods/
     base.py       CoercionMethod dataclass, METHODS registry
@@ -148,13 +148,14 @@ understanding the detection trade-offs documented in the research file.
 
 ## Port Redirect & pydivert
 
-`redirect.py` provides `PortRedirector` (ABC) with two backends:
+`redirect.py` provides `PortRedirector` (ABC) with a Windows-only backend:
 
-- **`IptablesRedirector`** (Linux) -- shell calls to `iptables -t nat` for
-  PREROUTING REDIRECT rules.
 - **`PydivertRedirector`** (Windows) -- uses the WinDivert kernel driver via
   the `pydivert` package with daemon threads that rewrite packet ports in
   real time.
+
+Linux iptables support was removed because it adds no value over direct port
+binding (both require root, port conflicts are rare on pentesting boxes).
 
 **Why it exists:** Standard UNC paths (`\\host\share`) always connect to port
 445.  When the user cannot bind port 445 (e.g., Windows workstation with SMB
