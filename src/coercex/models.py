@@ -184,6 +184,7 @@ class ScanConfig:
     callback_timeout: float = 5.0
     redirect: bool = False
     verbose: bool = False
+    stop_on_vulnerable: bool = False
 
     @property
     def has_listener(self) -> bool:

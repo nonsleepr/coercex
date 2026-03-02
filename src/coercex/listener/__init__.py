@@ -586,7 +586,37 @@ class AsyncListener:
             sec_buf_len = setup["SecurityBufferLength"]
             sec_blob = raw[sec_buf_offset:][:sec_buf_len]
 
+            log.debug(
+                "SESSION_SETUP Type 3 from %s: sec_buf_offset=%d sec_buf_len=%d raw_len=%d",
+                src_ip,
+                sec_buf_offset,
+                sec_buf_len,
+                len(raw),
+            )
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("SESSION_SETUP Type 3 sec_blob hex: %s", sec_blob.hex())
+
+            # Sanity check: sec_blob must be long enough
+            if sec_buf_len < 16:
+                log.warning(
+                    "SESSION_SETUP Type 3 from %s: sec_buf_len=%d too short, skipping NTLM parse",
+                    src_ip,
+                    sec_buf_len,
+                )
+                self._ip_fallback_callback(src_ip, src_port, sec_blob)
+                return
+
             ntlm_type3_raw = extract_spnego_ntlm_token(sec_blob)
+
+            # Another sanity check after SPNEGO unwrapping
+            if len(ntlm_type3_raw) < 16:
+                log.warning(
+                    "SESSION_SETUP Type 3 from %s: ntlm_type3_raw length=%d too short after SPNEGO unwrap",
+                    src_ip,
+                    len(ntlm_type3_raw),
+                )
+                self._ip_fallback_callback(src_ip, src_port, ntlm_type3_raw)
+                return
 
             # Parse Type 3 and extract credentials + hash
             username, domain, workstation, ntlmv2_hash = parse_ntlm_type3(

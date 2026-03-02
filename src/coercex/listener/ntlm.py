@@ -132,7 +132,14 @@ def parse_ntlm_type3(
     The hash_string is in Hashcat/John format:
       ``USERNAME::DOMAIN:CHALLENGE:NTPROOFSTR:BLOB``
     """
+    import logging
     from impacket import ntlm
+
+    log = logging.getLogger("coercex.listener.ntlm")
+
+    log.debug("parse_ntlm_type3: raw_token length=%d", len(raw_token))
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("parse_ntlm_type3: raw_token hex=%s", raw_token.hex())
 
     auth = ntlm.NTLMAuthChallengeResponse()
     auth.fromString(raw_token)
@@ -165,6 +172,12 @@ def parse_ntlm_type3(
             f"{server_challenge.hex()}"
         )
 
+    log.debug(
+        "parse_ntlm_type3: username=%s domain=%s workstation=%s",
+        username,
+        domain,
+        workstation,
+    )
     return username, domain, workstation, hash_str
 
 
@@ -174,28 +187,50 @@ def extract_spnego_ntlm_token(raw: bytes) -> bytes:
     Handles both NegTokenInit (client's first message) and
     NegTokenResp (client's second message with Type 3).
     """
+    import logging
     from impacket.spnego import SPNEGO_NegTokenInit, SPNEGO_NegTokenResp
+
+    log = logging.getLogger("coercex.listener.ntlm")
+
+    log.debug("extract_spnego_ntlm_token: raw length=%d", len(raw))
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "extract_spnego_ntlm_token: raw hex (first 64 bytes)=%s", raw[:64].hex()
+        )
 
     # Try NegTokenResp first (SESSION_SETUP #2, wraps Type 3)
     try:
         resp = SPNEGO_NegTokenResp(raw)
         token = resp["ResponseToken"]
         if token and len(token) > 0:
+            log.debug(
+                "extract_spnego_ntlm_token: extracted from NegTokenResp, length=%d",
+                len(token),
+            )
             return bytes(token)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("extract_spnego_ntlm_token: NegTokenResp parse failed: %s", e)
 
     # Try NegTokenInit (SESSION_SETUP #1, wraps Type 1)
     try:
         init = SPNEGO_NegTokenInit(raw)
         token = init["MechToken"]
         if token and len(token) > 0:
+            log.debug(
+                "extract_spnego_ntlm_token: extracted from NegTokenInit, length=%d",
+                len(token),
+            )
             return bytes(token)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("extract_spnego_ntlm_token: NegTokenInit parse failed: %s", e)
 
     # Raw NTLMSSP (no SPNEGO wrapper)
     if raw[:7] == b"NTLMSSP":
+        log.debug(
+            "extract_spnego_ntlm_token: raw NTLMSSP (no SPNEGO wrapper), length=%d",
+            len(raw),
+        )
         return raw
 
+    log.warning("extract_spnego_ntlm_token: no NTLM token found in %d bytes", len(raw))
     raise ValueError("Could not extract NTLM token from SPNEGO blob")

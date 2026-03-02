@@ -105,3 +105,13 @@ RedirectOpt = Annotated[
         ),
     ),
 ]
+StopOnVulnerableOpt = Annotated[
+    bool,
+    typer.Option(
+        "--stop-on-vulnerable",
+        help=(
+            "Stop scanning a target as soon as one vulnerable method is confirmed. "
+            "Reduces noise but may miss additional vulnerable methods."
+        ),
+    ),
+]

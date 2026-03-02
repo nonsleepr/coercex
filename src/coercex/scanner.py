@@ -60,6 +60,9 @@ class Scanner:
         self._redirector: PortRedirector | None = None
         self._redirect_active: bool = False
         self._semaphore = asyncio.Semaphore(config.concurrency)
+        # Track targets confirmed vulnerable (for --stop-on-vulnerable)
+        self._vulnerable_targets: set[str] = set()
+        self._vulnerable_lock = asyncio.Lock()
 
     def _unc_port(self, transport: Transport) -> int:
         """Port to embed in UNC paths.
@@ -376,6 +379,16 @@ class Scanner:
         pool = self._pool
         assert pool is not None
         async with self._semaphore:
+            # Early exit if target already confirmed vulnerable
+            if self.config.stop_on_vulnerable:
+                async with self._vulnerable_lock:
+                    if target in self._vulnerable_targets:
+                        log.debug(
+                            "Skipping %s (already confirmed vulnerable via --stop-on-vulnerable)",
+                            target,
+                        )
+                        return
+
             transport = transport_override or Transport.SMB
             path_style = path_style_override or "share_file"
 
@@ -459,6 +472,20 @@ class Scanner:
             # Populate transport / path_style on every result
             result.transport = transport.name.lower()
             result.path_style = path_style
+
+            # Mark target as vulnerable if confirmed
+            if (
+                result.result == TriggerResult.VULNERABLE
+                and self.config.stop_on_vulnerable
+            ):
+                async with self._vulnerable_lock:
+                    self._vulnerable_targets.add(target)
+                log.info(
+                    "Target %s confirmed vulnerable (%s::%s) — will skip further methods",
+                    target,
+                    method.protocol_short,
+                    method.function_name,
+                )
 
             self.stats.add(result)
             self._emit(result)
