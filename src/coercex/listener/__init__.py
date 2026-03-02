@@ -276,6 +276,22 @@ class AsyncListener:
                 callback.source_ip,
             )
 
+    def _record_partial_callback(self, callback: AuthCallback) -> None:
+        """Record a partial callback without consuming pending tokens.
+
+        Called by ``_handle_smb()`` when the handshake fails before
+        TREE_CONNECT can extract a token.  Updates ``_ip_latest_callback``
+        for the scanner's timestamp-based fallback
+        (``get_callback_since()``) but does **not** resolve any pending
+        futures or consume tokens from ``_pending_by_ip``.
+
+        This prevents the race condition where a failed connection steals
+        a pending token via FIFO before a successful connection can
+        deliver it via ``_resolve_token()``.
+        """
+        self._callbacks.append(callback)
+        self._ip_latest_callback[callback.source_ip] = callback
+
     def _extract_token_from_path(self, path: str) -> str | None:
         """Extract a 12-char hex token from a URL/share path.
 
@@ -636,8 +652,8 @@ class AsyncListener:
             raw = await recv_netbios(reader, timeout=5.0)
             log.debug("TREE_CONNECT from %s", src_ip)
             if len(raw) < 4 or raw[:4] != _SMB2_MAGIC:
-                # No TREE_CONNECT -- still resolve by IP + metadata
-                log.debug("No TREE_CONNECT from %s, using IP fallback", src_ip)
+                # No TREE_CONNECT -- record partial for timestamp fallback
+                log.debug("No TREE_CONNECT from %s, recording partial", src_ip)
                 callback = AuthCallback(
                     token="",
                     source_ip=src_ip,
@@ -650,7 +666,7 @@ class AsyncListener:
                     workstation=workstation,
                     ntlmv2_hash=ntlmv2_hash,
                 )
-                self._resolve_by_ip(src_ip, callback)
+                self._record_partial_callback(callback)
                 return
 
             from impacket.smb3structs import SMB2TreeConnect
@@ -676,7 +692,7 @@ class AsyncListener:
                     workstation=workstation,
                     ntlmv2_hash=ntlmv2_hash,
                 )
-                self._resolve_by_ip(src_ip, callback)
+                self._record_partial_callback(callback)
                 return
 
             # Extract the UNC path (UTF-16LE) from TREE_CONNECT
@@ -715,7 +731,7 @@ class AsyncListener:
             if token:
                 self._resolve_token(token, callback)
             else:
-                self._resolve_by_ip(src_ip, callback)
+                self._record_partial_callback(callback)
 
         except (asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
             log.debug(
@@ -728,7 +744,7 @@ class AsyncListener:
                 domain,
                 workstation,
             )
-            # Partial handshake -- still resolve by IP if we can
+            # Partial handshake -- record for timestamp fallback
             callback = AuthCallback(
                 token="",
                 source_ip=src_ip,
@@ -740,7 +756,7 @@ class AsyncListener:
                 workstation=workstation,
                 ntlmv2_hash=ntlmv2_hash,
             )
-            self._resolve_by_ip(src_ip, callback)
+            self._record_partial_callback(callback)
         except (ConnectionError, OSError) as exc:
             log.debug(
                 "SMB connection error from %s:%d: %s "
@@ -752,7 +768,7 @@ class AsyncListener:
                 domain,
                 workstation,
             )
-            # Partial handshake -- still resolve by IP with whatever we have
+            # Partial handshake -- record for timestamp fallback
             callback = AuthCallback(
                 token="",
                 source_ip=src_ip,
@@ -764,7 +780,7 @@ class AsyncListener:
                 workstation=workstation,
                 ntlmv2_hash=ntlmv2_hash,
             )
-            self._resolve_by_ip(src_ip, callback)
+            self._record_partial_callback(callback)
         except Exception as exc:
             log.warning(
                 "SMB handshake error from %s:%d: %s",
@@ -773,7 +789,7 @@ class AsyncListener:
                 exc,
                 exc_info=True,
             )
-            # Best-effort IP fallback
+            # Best-effort partial recording
             try:
                 callback = AuthCallback(
                     token="",
@@ -786,7 +802,7 @@ class AsyncListener:
                     workstation=workstation,
                     ntlmv2_hash=ntlmv2_hash,
                 )
-                self._resolve_by_ip(src_ip, callback)
+                self._record_partial_callback(callback)
             except Exception:
                 pass
         finally:
@@ -799,7 +815,12 @@ class AsyncListener:
     def _ip_fallback_callback(
         self, src_ip: str, src_port: int, raw: bytes = b""
     ) -> None:
-        """Create an AuthCallback and resolve by IP (early handshake failure)."""
+        """Record a partial callback for early handshake failures.
+
+        Does **not** consume pending tokens -- leaves them for
+        ``_resolve_token()`` when a successful TREE_CONNECT arrives on
+        another connection from the same target.
+        """
         callback = AuthCallback(
             token="",
             source_ip=src_ip,
@@ -808,7 +829,7 @@ class AsyncListener:
             transport="smb",
             raw_data=raw,
         )
-        self._resolve_by_ip(src_ip, callback)
+        self._record_partial_callback(callback)
 
     def _resolve_by_ip(self, src_ip: str, callback: AuthCallback) -> None:
         """Fallback: resolve the oldest pending token for a source IP (FIFO).

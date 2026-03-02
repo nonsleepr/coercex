@@ -1,21 +1,22 @@
-"""Tests for the listener FIFO race condition.
+"""Tests for the listener FIFO race condition and its fix.
 
-Demonstrates the race condition where multiple SMB connections from the
-same target IP cause _resolve_by_ip() to consume a pending token before
-_resolve_token() can be called via TREE_CONNECT.
+Tests cover:
+- Happy-path token resolution and IP-fallback
+- The FIFO race condition where _resolve_by_ip() consumed tokens before
+  _resolve_token() could deliver complete callbacks (now fixed via
+  _record_partial_callback())
+- Edge cases with multiple connections from a single trigger
+- Cross-token attribution bugs with concurrent triggers
 
-Scenario:
+The race condition scenario (now fixed):
     1. Scanner creates token_A for target 10.0.0.5
-    2. Target fires back two simultaneous SMB connections (common behavior
-       for PrinterBug/PetitPotam -- Windows often opens multiple SMB
-       connections for a single coercion trigger)
-    3. Connection 1's handshake fails before TREE_CONNECT (timeout, parse
-       error, etc.) -> _resolve_by_ip() is called -> steals token_A's future
-    4. Connection 2 completes the full handshake to TREE_CONNECT, extracts
-       token_A from the share path -> _resolve_token(token_A, ...) is called
-       -> but the future is ALREADY resolved by step 3, so this callback
-       (which has the actual NTLM hash and correct token attribution) is
-       silently dropped as "unknown/expired token"
+    2. Target fires back two simultaneous SMB connections
+    3. Connection 1's handshake fails before TREE_CONNECT -> error path
+       now calls _record_partial_callback() (NOT _resolve_by_ip()),
+       preserving the pending token
+    4. Connection 2 completes TREE_CONNECT with token_A ->
+       _resolve_token(token_A, ...) resolves the future with full NTLM
+       credentials
 
 The test calls the listener's internal methods directly to avoid needing
 real SMB connections.
@@ -99,39 +100,33 @@ async def test_ip_fallback_single_token(listener: AsyncListener) -> None:
     assert result.username == "DC01$"
 
 
-# -- THE RACE CONDITION: _resolve_by_ip steals the token -------------------
+# -- FIXED: partial callback does not steal the token -------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="BUG: _resolve_by_ip() steals token before _resolve_token() via TREE_CONNECT",
-    strict=True,
-)
-async def test_race_resolve_by_ip_steals_token(listener: AsyncListener) -> None:
-    """_resolve_by_ip() consumes token before _resolve_token() can use it.
+async def test_partial_callback_does_not_steal_token(listener: AsyncListener) -> None:
+    """_record_partial_callback() does not consume pending tokens.
 
-    This replicates the real-world scenario where:
-    - A single coercion trigger causes 2 SMB connections from the target
-    - Connection 1 fails mid-handshake -> _resolve_by_ip() steals the token
+    Scenario: A single coercion trigger causes 2 SMB connections.
+    - Connection 1 fails mid-handshake -> _record_partial_callback() records
+      the partial data but does NOT consume the pending token.
     - Connection 2 completes TREE_CONNECT with the real token ->
-      _resolve_token() finds the future already resolved
+      _resolve_token() resolves the future with full NTLM credentials.
 
-    The result: the future is resolved with a PARTIAL callback (no token
-    in the path, no NTLM hash if the failure was early enough), and the
-    COMPLETE callback from Connection 2 is silently dropped.
+    The scanner receives the COMPLETE callback from Connection 2.
     """
     token, future = listener.create_token(target_ip=TARGET_IP)
 
     # Connection 1: handshake fails before TREE_CONNECT.
-    # _handle_smb() error path calls _resolve_by_ip().
+    # _handle_smb() error path now calls _record_partial_callback().
     partial_callback = _make_callback(
         username="",  # no NTLM metadata if failure was early
         ntlmv2_hash="",
     )
-    listener._resolve_by_ip(TARGET_IP, partial_callback)
+    listener._record_partial_callback(partial_callback)
 
-    # The future is now resolved with the PARTIAL callback
-    assert future.done(), "Future should be resolved by IP fallback"
+    # The future is NOT resolved -- token is still available
+    assert not future.done(), "Partial callback should not resolve the future"
 
     # Connection 2: completes full handshake to TREE_CONNECT.
     # _handle_smb() success path calls _resolve_token().
@@ -143,14 +138,14 @@ async def test_race_resolve_by_ip_steals_token(listener: AsyncListener) -> None:
     )
     listener._resolve_token(token, complete_callback)
 
-    # DESIRED: The future should contain the COMPLETE callback from
-    # Connection 2 (with NTLM hash and username), not the empty partial
-    # from Connection 1.
+    # The future is now resolved with the COMPLETE callback
+    assert future.done(), "Future should be resolved by _resolve_token"
     final_result = future.result()
     assert final_result.username == "DC01$", (
         "Expected the complete callback with NTLM metadata, "
         f"but got username={final_result.username!r}"
     )
+    assert final_result.ntlmv2_hash == "DC01$::CORP:aabbccdd..."
 
 
 # -- RACE with late NTLM metadata: IP fallback gets credentials but wrong attribution
@@ -318,29 +313,26 @@ async def test_exception_handler_steals_token(listener: AsyncListener) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="BUG: _ip_fallback_callback() steals token before TREE_CONNECT can deliver it",
-    strict=True,
-)
-async def test_early_handshake_failure_steals_token(listener: AsyncListener) -> None:
-    """_ip_fallback_callback() fires for early failures (bad magic, wrong cmd).
+async def test_early_handshake_failure_does_not_steal_token(
+    listener: AsyncListener,
+) -> None:
+    """_ip_fallback_callback() no longer steals tokens.
 
-    These failures happen BEFORE NTLM auth, so the callback has NO credentials.
-    The token is consumed with an empty callback.
+    Early handshake failures (bad magic, wrong cmd) call
+    _ip_fallback_callback() which now uses _record_partial_callback()
+    internally.  The pending token is preserved for _resolve_token()
+    when a successful TREE_CONNECT arrives on another connection.
     """
     token, future = listener.create_token(target_ip=TARGET_IP)
 
-    # Simulate: Unknown SMB magic -> _ip_fallback_callback() -> _resolve_by_ip()
-    # This is what happens at listener/__init__.py:446
+    # Simulate: Unknown SMB magic -> _ip_fallback_callback()
+    # This records a partial callback but does NOT consume the token.
     listener._ip_fallback_callback(TARGET_IP, 49152, b"\xde\xad\xbe\xef")
 
-    assert future.done()
-    result = future.result()
-    assert result.username == ""  # no credentials from early failure
-    assert result.ntlmv2_hash == ""  # no hash
+    # The future is NOT resolved -- token still available
+    assert not future.done(), "Partial fallback should not resolve the future"
 
-    # The token is consumed with NO useful data.
-    # A second connection with the actual TREE_CONNECT + NTLM arrives:
+    # A second connection completes TREE_CONNECT with the real token + NTLM:
     real_callback = _make_callback(
         token=token,
         username="DC01$",
@@ -349,15 +341,9 @@ async def test_early_handshake_failure_steals_token(listener: AsyncListener) -> 
     )
     listener._resolve_token(token, real_callback)
 
-    # DESIRED: The future should contain the REAL callback, not the empty one.
+    # The future is now resolved with the COMPLETE callback
+    assert future.done(), "Future should be resolved by _resolve_token"
     assert future.result().username == "DC01$", (
         "Expected real callback with credentials"
     )
     assert future.result().ntlmv2_hash == "DC01$::CORP:realhash", "Expected real hash"
-    listener._resolve_token(token, real_callback)
-
-    # BUG: future still has the empty callback from the early failure
-    assert future.result().username == "", (
-        "BUG: Real callback with credentials was dropped"
-    )
-    assert future.result().ntlmv2_hash == "", "BUG: Real hash was dropped"
