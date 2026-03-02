@@ -92,6 +92,6 @@ def classify_error(error: Exception) -> TriggerResult:
     import logging
 
     log = logging.getLogger("coercex.errors")
-    log.debug("Unknown error classification: %s", str(error)[:200])
+    log.warning("Unknown error classification: %s", str(error)[:200])
 
     return TriggerResult.UNKNOWN_ERROR

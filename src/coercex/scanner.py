@@ -431,7 +431,7 @@ class Scanner:
             return
 
         needs_drain = any(
-            r.result == TriggerResult.ACCESSIBLE
+            r.result in (TriggerResult.ACCESSIBLE, TriggerResult.UNKNOWN_ERROR)
             or (r.result == TriggerResult.VULNERABLE and not r.auth_user)
             for r in self.stats.results
         )
@@ -449,9 +449,13 @@ class Scanner:
 
         listener = self._listener
         for result in self.stats.results:
-            if result.result == TriggerResult.ACCESSIBLE:
+            if result.result in (
+                TriggerResult.ACCESSIBLE,
+                TriggerResult.UNKNOWN_ERROR,
+            ):
                 cb = listener.get_callback_since(result.target, scan_start)
                 if cb is not None:
+                    prev = result.result
                     result.result = TriggerResult.VULNERABLE
                     result.callback_received = True
                     result.source_ip = cb.source_ip
@@ -462,7 +466,10 @@ class Scanner:
                     if cb.ntlmv2_hash:
                         result.ntlmv2_hash = cb.ntlmv2_hash
                     self.stats.vulnerable += 1
-                    self.stats.accessible -= 1
+                    if prev == TriggerResult.ACCESSIBLE:
+                        self.stats.accessible -= 1
+                    else:
+                        self.stats.unknown_errors -= 1
                     self._emit(result)
 
             elif result.result == TriggerResult.VULNERABLE and not result.auth_user:
@@ -607,9 +614,12 @@ class Scanner:
                     result = await pool.trigger_method(target, method, binding, path)
 
                     # Wait for callback if trigger indicated vulnerability
+                    # or returned an unclassified error (the trigger may have
+                    # fired even if the RPC error code is unrecognised).
                     if result.result in (
                         TriggerResult.VULNERABLE,
                         TriggerResult.ACCESSIBLE,
+                        TriggerResult.UNKNOWN_ERROR,
                     ):
                         # Two-stage await for token-based correlation:
                         # Stage 1: Normal timeout (callback_timeout)
@@ -731,16 +741,22 @@ class Scanner:
             TriggerResult.VULNERABLE,
             TriggerResult.ACCESSIBLE,
             TriggerResult.SENT,
+            TriggerResult.UNKNOWN_ERROR,
         )
         if show:
             style, sym = STATUS_STYLE.get(result.result, ("dim red", "[?]"))
             cb = " [bold green](callback!)[/]" if result.callback_received else ""
             tr = f" [dim]({result.transport})[/]" if result.transport else ""
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
+            err = (
+                f" [dim red]{result.error[:80]}[/]"
+                if result.error and result.result == TriggerResult.UNKNOWN_ERROR
+                else ""
+            )
             self.console.print(
                 f"[{style}]{sym}[/] {result.target} | "
                 f"[blue]{result.protocol}[/]::{result.method} "
-                f"via [dim]{result.pipe}[/]{tr}{cb}{auth}"
+                f"via [dim]{result.pipe}[/]{tr}{cb}{auth}{err}"
             )
             if result.ntlmv2_hash:
                 self.console.print(f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}")
