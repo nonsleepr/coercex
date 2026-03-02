@@ -117,6 +117,7 @@ def _print_summary(stats: ScanStats) -> None:
         f"[dim]Not Available:[/] {stats.not_available}",
         f"[bold red]Connect Errors:[/]{stats.connect_errors}",
         f"[magenta]Timeouts:[/]      {stats.timeouts}",
+        f"[dim red]Unknown Errors:[/] {stats.unknown_errors}",
     ]
     console.print(Panel("\n".join(lines), title="Summary", border_style="cyan"))
 

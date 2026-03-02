@@ -134,6 +134,7 @@ class ScanStats:
     connect_errors: int = 0
     timeouts: int = 0
     sent: int = 0
+    unknown_errors: int = 0
     results: list[ScanResult] = field(default_factory=list)
 
     def add(self, result: ScanResult) -> None:
@@ -154,6 +155,8 @@ class ScanStats:
                 self.timeouts += 1
             case TriggerResult.SENT:
                 self.sent += 1
+            case TriggerResult.UNKNOWN_ERROR:
+                self.unknown_errors += 1
 
 
 class Mode(Enum):
