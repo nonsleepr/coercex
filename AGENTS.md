@@ -4,6 +4,65 @@ Async NTLM authentication coercion scanner replacing Coercer.  Two modes:
 **scan** (detect vulnerable methods, runs local listener) and **coerce**
 (fire-and-forget triggers aimed at an external relay).
 
+## Scanning Modes & Optimization
+
+coercex supports two scanning strategies controlled by `--stop-on-vulnerable`:
+
+### Fast Scan (--stop-on-vulnerable)
+
+**Goal:** Find one working coercion method ASAP for immediate exploitation.
+
+**Behavior:**
+- **Method-sequential, target-parallel execution** — one method at a time
+  across all targets, guarantees priority order
+- **Priority-based ordering** — tries most-likely-vulnerable methods first:
+  1. MS-EFSR (PetitPotam) - priority 1
+  2. MS-RPRN (PrinterBug) - priority 2
+  3. MS-DFSNM (DFSCoerce) - priority 3
+  4. MS-PAR (Async Print) - priority 4
+  5. MS-EVEN (Eventlog) - priority 5
+  6. MS-FSRVP (ShadowCoerce) - priority 6
+  7. MS-TSCH (Task Scheduler) - priority 7
+- **Only tests default path_style** (first in `path_styles` list) to minimize
+  noise
+- **Pre-flight endpoint probing** — tests connectivity to unique (pipe, uuid)
+  bindings before attempting triggers, eliminates ~40-50% of futile attempts
+- **Connection pool warming** — pre-flight probe sessions are cached and
+  reused by subsequent trigger calls
+- **Stops when first VULNERABLE result found** — removes target from scan set
+
+**OPSEC-conscious variant:**
+```bash
+uv run coercex scan TARGET -u USER -p PASS --stop-on-vulnerable \
+  -c 1 --transport http --delay 2
+```
+- `-c 1` = no temporal correlation (one attempt at a time)
+- `--transport http` = avoid SMB event logging (EventID 4648/8004)
+- `--delay 2` = 2-second delay between attempts (spread over time)
+
+### Full Scan (default)
+
+**Goal:** Comprehensive testing for pentesting reports.
+
+**Behavior:**
+- **All combinations upfront** — methods × targets × bindings × path_styles
+- **Fully parallel execution** — bounded only by `-c/--concurrency` semaphore
+- **Tests all path_styles** — identifies every vulnerable method/path combo
+- **Priority-sorted output** — results displayed in priority order for clarity
+- **Pre-flight probing still runs** — eliminates unreachable endpoints upfront
+
+### Pre-flight Endpoint Probing
+
+Before attempting any triggers, the scanner:
+1. Extracts unique `(pipe, uuid, version)` bindings from selected methods
+2. Tests connectivity to each binding on each target in parallel
+3. Marks endpoints as reachable/unreachable (displayed in progress output)
+4. Only attempts triggers on reachable endpoints
+5. Warms the connection pool (sessions are cached for reuse)
+
+**Typical results:** 12 unique bindings across all 19 methods, ~40-50% unreachable
+on average Windows targets (missing services, unregistered interfaces).
+
 ## Build & Run
 
 ```bash
