@@ -253,7 +253,7 @@ class AsyncListener:
         future = self._pending.pop(token, None)
         if future and not future.done():
             future.set_result(callback)
-            log.info(
+            log.debug(
                 "Callback received: token=%s src=%s:%d transport=%s",
                 token,
                 callback.source_ip,
@@ -610,7 +610,7 @@ class AsyncListener:
                 domain,
                 workstation,
             )
-            log.info(
+            log.debug(
                 "NTLM auth from %s: %s\\%s (%s)",
                 src_ip,
                 domain,
@@ -618,7 +618,7 @@ class AsyncListener:
                 workstation,
             )
             if ntlmv2_hash:
-                log.info("Net-NTLMv2 hash: %s", ntlmv2_hash)
+                log.debug("Net-NTLMv2 hash: %s", ntlmv2_hash)
 
             # Eagerly update the IP-based fallback callback with NTLM
             # metadata *before* TREE_CONNECT.  If the scanner's
@@ -845,7 +845,7 @@ class AsyncListener:
 
         token_list = self._pending_by_ip.get(src_ip)
         if not token_list:
-            log.info("SMB callback from %s -- no pending tokens for this IP", src_ip)
+            log.debug("SMB callback from %s -- no pending tokens for this IP", src_ip)
             return
 
         # Walk the FIFO list, find the first token whose future is still pending
@@ -859,7 +859,7 @@ class AsyncListener:
                 self._token_to_ip.pop(token, None)
                 callback.token = token
                 future.set_result(callback)
-                log.info(
+                log.debug(
                     "IP-correlated callback: src=%s token=%s (FIFO best-guess)",
                     src_ip,
                     token,
@@ -874,7 +874,7 @@ class AsyncListener:
 
         # All tokens for this IP were already resolved/cancelled
         del self._pending_by_ip[src_ip]
-        log.info("SMB callback from %s -- all pending tokens already resolved", src_ip)
+        log.debug("SMB callback from %s -- all pending tokens already resolved", src_ip)
 
     def has_connection_from(self, target: str, since: float) -> bool:
         """Check if ANY connection was received from *target* at or after *since*.
