@@ -10,8 +10,21 @@ transparent port redirection so that:
 
 Platform support:
 
-  - **Linux**: ``iptables`` NAT PREROUTING/OUTPUT REDIRECT rules
-  - **Windows**: ``pydivert`` (WinDivert kernel driver)
+  - **Windows**: ``pydivert`` (WinDivert kernel driver) — REQUIRED
+  - **Linux/macOS**: Not supported (bind directly to 80/445 with sudo)
+
+Rationale for Windows-only:
+
+  On Linux, --redirect adds no value over direct binding:
+
+  - Both require root privileges
+  - Port conflicts are rare on pentesting attack boxes
+  - iptables adds complexity with no benefit
+
+  On Windows, --redirect solves a real problem:
+
+  - SMB Server service always uses port 445 (can't easily stop)
+  - pydivert allows coercion without stopping system services
 
 When redirect is active, :func:`build_unc_path` should be called with
 the *standard* port (445/80) so the resulting UNC path is a normal SMB
@@ -23,8 +36,6 @@ from __future__ import annotations
 
 import atexit
 import logging
-import shutil
-import subprocess
 import sys
 import threading
 from abc import ABC, abstractmethod
@@ -46,98 +57,6 @@ class PortRedirector(ABC):
     @abstractmethod
     def cleanup(self) -> None:
         """Remove all redirect rules added by this instance."""
-
-
-class IptablesRedirector(PortRedirector):
-    """Linux ``iptables`` NAT PREROUTING REDIRECT rules.
-
-    Requires root / ``CAP_NET_ADMIN``.
-    """
-
-    def __init__(self) -> None:
-        self._rules: list[tuple[int, int]] = []
-        iptables = shutil.which("iptables")
-        if not iptables:
-            raise RuntimeError(
-                "iptables not found in PATH — install iptables or use "
-                "--no-redirect to fall back to WebDAV @port format"
-            )
-        self._iptables: str = iptables
-
-    def _run(self, *args: str) -> None:
-        result = subprocess.run(
-            [self._iptables, *args],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"iptables failed: {result.stderr.strip()}")
-
-    def add_redirect(self, from_port: int, to_port: int) -> None:
-        if from_port == to_port:
-            return
-        # PREROUTING: catch packets arriving from the network
-        self._run(
-            "-t",
-            "nat",
-            "-I",
-            "PREROUTING",
-            "-p",
-            "tcp",
-            "--dport",
-            str(from_port),
-            "-j",
-            "REDIRECT",
-            "--to-port",
-            str(to_port),
-        )
-        # OUTPUT: catch locally-generated traffic (e.g. testing on loopback)
-        self._run(
-            "-t",
-            "nat",
-            "-I",
-            "OUTPUT",
-            "-p",
-            "tcp",
-            "--dport",
-            str(from_port),
-            "-j",
-            "REDIRECT",
-            "--to-port",
-            str(to_port),
-        )
-        self._rules.append((from_port, to_port))
-        log.info("iptables redirect: %d → %d", from_port, to_port)
-
-    def cleanup(self) -> None:
-        for from_port, to_port in self._rules:
-            for chain in ("PREROUTING", "OUTPUT"):
-                try:
-                    self._run(
-                        "-t",
-                        "nat",
-                        "-D",
-                        chain,
-                        "-p",
-                        "tcp",
-                        "--dport",
-                        str(from_port),
-                        "-j",
-                        "REDIRECT",
-                        "--to-port",
-                        str(to_port),
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "Failed to remove iptables %s rule %d→%d: %s",
-                        chain,
-                        from_port,
-                        to_port,
-                        exc,
-                    )
-            log.info("Removed iptables redirect: %d → %d", from_port, to_port)
-        self._rules.clear()
 
 
 class PydivertRedirector(PortRedirector):
@@ -199,18 +118,16 @@ class PydivertRedirector(PortRedirector):
 def create_redirector() -> PortRedirector:
     """Create the appropriate redirector for the current platform.
 
-    Raises :class:`RuntimeError` if the platform is unsupported or the
-    required tooling is missing.
+    Raises :class:`RuntimeError` if the platform is not Windows or pydivert
+    is not installed.
     """
     if sys.platform == "win32":
         return PydivertRedirector()
-    elif sys.platform.startswith("linux"):
-        return IptablesRedirector()
     else:
         raise RuntimeError(
-            f"Port redirection not implemented for {sys.platform}. "
-            "Use --no-redirect and set up redirection manually, or "
-            "use standard ports (445/80) which don't need redirection."
+            f"Port redirection is only supported on Windows (via pydivert). "
+            f"On {sys.platform}, bind directly to standard ports (445/80) with sudo instead. "
+            "Use --no-redirect to disable this feature."
         )
 
 

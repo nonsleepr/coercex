@@ -98,10 +98,11 @@ RedirectOpt = Annotated[
     typer.Option(
         "--redirect/--no-redirect",
         help=(
-            "Redirect standard ports (445/80) to listener ports via "
-            "iptables (Linux) or pydivert (Windows).  Allows standard SMB "
-            "UNC paths even when binding on non-standard ports.  "
-            "Requires root/admin."
+            "[Windows only] Redirect standard ports (445/80) to listener ports via "
+            "pydivert (WinDivert kernel driver). Allows standard SMB UNC paths when "
+            "binding non-standard ports (e.g. to avoid conflicts with SMB Server service). "
+            "Requires Administrator privileges and pydivert package. "
+            "On Linux/macOS, bind directly to ports 80/445 with sudo instead."
         ),
     ),
 ]

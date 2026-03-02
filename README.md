@@ -11,7 +11,7 @@ Async NTLM authentication coercion scanner. A high-performance replacement for C
 - **Async architecture** with configurable concurrency (50-200 concurrent tasks)
 - **Connection pooling** by (target, pipe, UUID) for session reuse
 - **WebDAV transport** support (`\\host@port\share` format) to bypass SMB signing
-- **Port redirect** via iptables (Linux) or pydivert (Windows) for non-standard listener ports
+- **Port redirect** via pydivert (Windows only) for non-standard listener ports
 - **Token correlation** for confirmed callback verification (scan mode)
 - **Rich terminal output** with tables, colors, and progress indicators
 
@@ -44,7 +44,7 @@ coercex scan -t dc01 -u user -p pass --pipes '\PIPE\spoolss'
 # High-concurrency scan with hash auth
 coercex scan -t dc01.corp.local -u user -H aad3b435b51404ee:abc123... -d corp --concurrency 200
 
-# Scan on non-standard ports with port redirect (requires root/admin)
+# Scan on non-standard ports with port redirect (Windows only, requires Admin)
 coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
 ```
 
