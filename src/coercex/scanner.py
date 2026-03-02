@@ -125,7 +125,9 @@ class Scanner:
         # ── Scan mode: always start listener (auto-detect IP if needed) ─
         if self.config.mode == Mode.SCAN:
             if not self.config.listener_host:
-                self.config.listener_host = get_local_ip()
+                # Pass the first target IP for route-based interface selection
+                first_target = self.config.targets[0] if self.config.targets else None
+                self.config.listener_host = get_local_ip(first_target)
                 self.console.print(
                     f"[dim]Auto-detected listener IP: "
                     f"[bold]{self.config.listener_host}[/][/]"
