@@ -61,6 +61,9 @@ class CoercionMethod:
     # Optional: requires a pre-step (e.g., RPRN needs hRpcOpenPrinter first)
     needs_target_handle: bool = False
 
+    # Execution priority (lower = tried first; 1 = highest priority)
+    priority: int = 5
+
     def __repr__(self) -> str:
         return f"{self.protocol_short}::{self.function_name} (opnum {self.opnum})"
 

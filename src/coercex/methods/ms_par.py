@@ -46,5 +46,6 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(PAR_PIPES),
             path_styles=list(PAR_PATH_STYLES),
             trigger_fn=_trigger_async_open_printer,
+            priority=4,  # Async Print - less documented RPRN variant
         ),
     ]

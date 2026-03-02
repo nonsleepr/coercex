@@ -116,3 +116,14 @@ StopOnVulnerableOpt = Annotated[
         ),
     ),
 ]
+DelayOpt = Annotated[
+    float,
+    typer.Option(
+        "--delay",
+        help=(
+            "Seconds to wait between attempts per target (default: 0). "
+            "Use for OPSEC stealth (e.g. --delay 2 spreads attempts over time). "
+            "Combine with -c 1 --transport http for maximum stealth."
+        ),
+    ),
+]

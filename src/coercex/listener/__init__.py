@@ -855,6 +855,22 @@ class AsyncListener:
         del self._pending_by_ip[src_ip]
         log.info("SMB callback from %s -- all pending tokens already resolved", src_ip)
 
+    def has_connection_from(self, target: str, since: float) -> bool:
+        """Check if ANY connection was received from *target* at or after *since*.
+
+        *target* can be a hostname or IP -- it is resolved to an IP before
+        comparison.  *since* should be a ``time.monotonic()`` timestamp
+        recorded **before** the coercion trigger was fired.
+
+        This checks if the target has connected (even if the handshake is
+        still in progress and the token hasn't been extracted yet).
+        """
+        resolved = _resolve_to_ip(target)
+        timestamps = self._ip_callback_times.get(resolved)
+        if not timestamps:
+            return False
+        return any(t >= since for t in timestamps)
+
     def get_callback_since(self, target: str, since: float) -> AuthCallback | None:
         """Return the latest callback from *target* at or after *since*, or None.
 

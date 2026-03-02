@@ -86,5 +86,6 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(TSCH_PIPES),
             path_styles=list(TSCH_PATH_STYLES),
             trigger_fn=_trigger_register_task,
+            priority=7,  # Task Scheduler - rarely vulnerable
         ),
     ]

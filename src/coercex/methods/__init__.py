@@ -122,6 +122,9 @@ def get_all_methods(
                 filtered.append(replace(m, pipe_bindings=kept))
         methods = filtered
 
+    # Sort by priority (lower = higher priority = tried first)
+    methods.sort(key=lambda m: m.priority)
+
     return methods
 
 

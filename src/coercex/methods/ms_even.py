@@ -51,5 +51,6 @@ def get_methods() -> list[CoercionMethod]:
             pipe_bindings=list(EVEN_PIPES),
             path_styles=list(EVEN_PATH_STYLES),
             trigger_fn=_trigger_elfr_open_belw,
+            priority=5,  # Eventlog - older systems
         ),
     ]
