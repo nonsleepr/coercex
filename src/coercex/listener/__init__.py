@@ -249,7 +249,11 @@ class AsyncListener:
     def _resolve_token(self, token: str, callback: AuthCallback) -> None:
         """Try to resolve a token with a callback."""
         self._callbacks.append(callback)
-        self._ip_latest_callback[callback.source_ip] = callback
+        # Only overwrite if the new callback has credentials, or the
+        # existing one has none — prevents losing NTLM data.
+        existing = self._ip_latest_callback.get(callback.source_ip)
+        if existing is None or not existing.username or callback.username:
+            self._ip_latest_callback[callback.source_ip] = callback
         future = self._pending.pop(token, None)
         if future and not future.done():
             future.set_result(callback)
@@ -290,7 +294,13 @@ class AsyncListener:
         deliver it via ``_resolve_token()``.
         """
         self._callbacks.append(callback)
-        self._ip_latest_callback[callback.source_ip] = callback
+        # Only overwrite the existing callback if the new one has NTLM
+        # credentials, OR the existing one has none.  This prevents a
+        # later partial callback (from a failed concurrent connection)
+        # from wiping out NTLM credentials captured by an earlier one.
+        existing = self._ip_latest_callback.get(callback.source_ip)
+        if existing is None or not existing.username or callback.username:
+            self._ip_latest_callback[callback.source_ip] = callback
 
     def _extract_token_from_path(self, path: str) -> str | None:
         """Extract a 12-char hex token from a URL/share path.
@@ -322,16 +332,17 @@ class AsyncListener:
             src_port = peername[1] if peername else 0
 
             # Record callback timestamp for get_callback_since() fallback.
-            # Always overwrite so each new connection supersedes any stale
-            # preliminary from a prior attempt.
+            # Only overwrite if no existing callback with NTLM credentials.
             self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
-            self._ip_latest_callback[src_ip] = AuthCallback(
-                token="",
-                source_ip=src_ip,
-                source_port=src_port,
-                timestamp=datetime.now(timezone.utc),
-                transport="http",
-            )
+            existing = self._ip_latest_callback.get(src_ip)
+            if existing is None or not existing.username:
+                self._ip_latest_callback[src_ip] = AuthCallback(
+                    token="",
+                    source_ip=src_ip,
+                    source_port=src_port,
+                    timestamp=datetime.now(timezone.utc),
+                    transport="http",
+                )
 
             # Read the HTTP request line
             request_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -407,17 +418,21 @@ class AsyncListener:
         # Also store a preliminary AuthCallback so the fallback can
         # return *something* even if the full handshake hasn't finished.
         self._ip_callback_times.setdefault(src_ip, []).append(time.monotonic())
-        # Always store a preliminary callback so get_callback_since() can
-        # return *something* even if the full handshake hasn't finished.
-        # Overwrite unconditionally -- a new connection supersedes any stale
-        # preliminary from a prior attempt.
-        self._ip_latest_callback[src_ip] = AuthCallback(
-            token="",
-            source_ip=src_ip,
-            source_port=src_port,
-            timestamp=datetime.now(timezone.utc),
-            transport="smb",
-        )
+        # Store a preliminary callback ONLY if there is no existing callback
+        # that already has NTLM credentials.  When the target opens multiple
+        # simultaneous SMB connections (common with coercion), a later
+        # connection's empty preliminary must not overwrite an earlier
+        # connection's NTLM-enriched callback — otherwise get_callback_since()
+        # returns credentials-less data.
+        existing = self._ip_latest_callback.get(src_ip)
+        if existing is None or not existing.username:
+            self._ip_latest_callback[src_ip] = AuthCallback(
+                token="",
+                source_ip=src_ip,
+                source_port=src_port,
+                timestamp=datetime.now(timezone.utc),
+                transport="smb",
+            )
 
         log.debug("SMB connection from %s:%d", src_ip, src_port)
 
@@ -841,7 +856,9 @@ class AsyncListener:
         trigger actually caused the callback.
         """
         self._callbacks.append(callback)
-        self._ip_latest_callback[callback.source_ip] = callback
+        existing = self._ip_latest_callback.get(callback.source_ip)
+        if existing is None or not existing.username or callback.username:
+            self._ip_latest_callback[callback.source_ip] = callback
 
         token_list = self._pending_by_ip.get(src_ip)
         if not token_list:

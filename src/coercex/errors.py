@@ -82,10 +82,9 @@ def classify_error(error: Exception) -> TriggerResult:
     if "cannot be null" in err_str or "pclientinfo cannot be null" in err_str:
         return TriggerResult.NOT_AVAILABLE
 
-    # Module attribute errors - likely impacket version mismatch or missing Response class
-    if "has no attribute" in err_str and (
-        "sessionerror" in err_str or "response" in err_str
-    ):
+    # Module/class attribute errors - impacket version mismatch, missing
+    # Request/Response NDRCALL classes, or missing SessionError subclass.
+    if "has no attribute" in err_str:
         return TriggerResult.NOT_AVAILABLE
 
     # Log unknown errors for debugging
