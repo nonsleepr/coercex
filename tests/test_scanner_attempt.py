@@ -555,6 +555,213 @@ class TestDrainCallbacks:
         assert result.result == TriggerResult.ACCESS_DENIED
 
     @pytest.mark.asyncio
+    async def test_drain_enriches_vulnerable_missing_auth(self) -> None:
+        """VULNERABLE result missing auth_user gets enriched from late callback."""
+        config = _make_config(callback_timeout=0.05)
+        scanner = Scanner(config)
+
+        listener = AsyncListener(enable_http=False, enable_smb=False)
+        listener._loop = asyncio.get_running_loop()
+        scanner._listener = listener
+
+        scan_start = time.monotonic()
+
+        # Manually add a VULNERABLE result with no auth_user (e.g. from
+        # the timestamp fallback path where the callback arrived but the
+        # NTLM handshake wasn't complete yet)
+        result = ScanResult(
+            target=TARGET_IP,
+            protocol="MS-RPRN",
+            method="RpcRemoteFindFirstPrinterChangeNotificationEx",
+            pipe=r"\PIPE\spoolss",
+            uuid="12345678-1234-abcd-ef00-0123456789ab",
+            result=TriggerResult.VULNERABLE,
+            transport="smb",
+            callback_received=True,
+            source_ip=TARGET_IP,
+        )
+        scanner.stats.add(result)
+
+        # Simulate: after drain sleep, the handshake has completed and
+        # _ip_latest_callback now has full credentials.
+        listener._ip_callback_times.setdefault(TARGET_IP, []).append(time.monotonic())
+        cb = _make_callback(
+            username="DC01$",
+            domain="INLANEFREIGHT",
+            ntlmv2_hash="DC01$::INLANEFREIGHT:aabbccdd:112233:4455",
+            transport="smb",
+        )
+        listener._ip_latest_callback[TARGET_IP] = cb
+
+        await scanner._drain_callbacks(scan_start)
+
+        # Result should now have credentials
+        assert result.result == TriggerResult.VULNERABLE
+        assert result.auth_user == "INLANEFREIGHT\\DC01$"
+        assert result.ntlmv2_hash == "DC01$::INLANEFREIGHT:aabbccdd:112233:4455"
+
+    @pytest.mark.asyncio
+    async def test_drain_enriches_vulnerable_only_hash(self) -> None:
+        """VULNERABLE result with auth_user but missing hash gets hash enriched."""
+        config = _make_config(callback_timeout=0.05)
+        scanner = Scanner(config)
+
+        listener = AsyncListener(enable_http=False, enable_smb=False)
+        listener._loop = asyncio.get_running_loop()
+        scanner._listener = listener
+
+        scan_start = time.monotonic()
+
+        # Result already has auth_user (e.g. from partial callback) but no hash
+        result = ScanResult(
+            target=TARGET_IP,
+            protocol="MS-RPRN",
+            method="RpcRemoteFindFirstPrinterChangeNotificationEx",
+            pipe=r"\PIPE\spoolss",
+            uuid="12345678-1234-abcd-ef00-0123456789ab",
+            result=TriggerResult.VULNERABLE,
+            transport="smb",
+            callback_received=True,
+            source_ip=TARGET_IP,
+            auth_user="INLANEFREIGHT\\DC01$",
+        )
+        scanner.stats.add(result)
+
+        # Callback has full credentials including hash
+        listener._ip_callback_times.setdefault(TARGET_IP, []).append(time.monotonic())
+        cb = _make_callback(
+            username="DC01$",
+            domain="INLANEFREIGHT",
+            ntlmv2_hash="DC01$::INLANEFREIGHT:aabbccdd:112233:4455",
+            transport="smb",
+        )
+        listener._ip_latest_callback[TARGET_IP] = cb
+
+        await scanner._drain_callbacks(scan_start)
+
+        # auth_user was already set — drain doesn't overwrite it
+        assert result.auth_user == "INLANEFREIGHT\\DC01$"
+        # hash was missing — drain enriches it from the callback
+        assert result.ntlmv2_hash == "DC01$::INLANEFREIGHT:aabbccdd:112233:4455"
+
+    @pytest.mark.asyncio
+    async def test_drain_skips_fully_enriched_vulnerable(self) -> None:
+        """VULNERABLE result with both auth_user and hash already set → drain skips."""
+        config = _make_config(callback_timeout=0.05)
+        scanner = Scanner(config)
+
+        listener = AsyncListener(enable_http=False, enable_smb=False)
+        listener._loop = asyncio.get_running_loop()
+        scanner._listener = listener
+
+        scan_start = time.monotonic()
+
+        # Result already fully enriched
+        result = ScanResult(
+            target=TARGET_IP,
+            protocol="MS-RPRN",
+            method="RpcRemoteFindFirstPrinterChangeNotificationEx",
+            pipe=r"\PIPE\spoolss",
+            uuid="12345678-1234-abcd-ef00-0123456789ab",
+            result=TriggerResult.VULNERABLE,
+            transport="smb",
+            callback_received=True,
+            source_ip=TARGET_IP,
+            auth_user="INLANEFREIGHT\\DC01$",
+            ntlmv2_hash="DC01$::INLANEFREIGHT:existing_hash",
+        )
+        scanner.stats.add(result)
+
+        # Even though callback data exists, drain should skip (already enriched)
+        listener._ip_callback_times.setdefault(TARGET_IP, []).append(time.monotonic())
+        cb = _make_callback(
+            username="DC01$",
+            domain="INLANEFREIGHT",
+            ntlmv2_hash="DC01$::INLANEFREIGHT:different_hash",
+            transport="smb",
+        )
+        listener._ip_latest_callback[TARGET_IP] = cb
+
+        await scanner._drain_callbacks(scan_start)
+
+        # No enrichment — both fields were already set
+        assert result.auth_user == "INLANEFREIGHT\\DC01$"
+        assert result.ntlmv2_hash == "DC01$::INLANEFREIGHT:existing_hash"
+
+    @pytest.mark.asyncio
+    async def test_drain_no_callback_for_vulnerable(self) -> None:
+        """VULNERABLE with no auth_user but no callback data → stays unenriched."""
+        config = _make_config(callback_timeout=0.05)
+        scanner = Scanner(config)
+
+        listener = AsyncListener(enable_http=False, enable_smb=False)
+        listener._loop = asyncio.get_running_loop()
+        scanner._listener = listener
+
+        scan_start = time.monotonic()
+
+        result = ScanResult(
+            target=TARGET_IP,
+            protocol="MS-RPRN",
+            method="RpcRemoteFindFirstPrinterChangeNotificationEx",
+            pipe=r"\PIPE\spoolss",
+            uuid="12345678-1234-abcd-ef00-0123456789ab",
+            result=TriggerResult.VULNERABLE,
+            transport="smb",
+            callback_received=True,
+            source_ip=TARGET_IP,
+        )
+        scanner.stats.add(result)
+
+        # No callback data in the listener at all
+        await scanner._drain_callbacks(scan_start)
+
+        # Result stays unenriched
+        assert result.auth_user == ""
+        assert result.ntlmv2_hash == ""
+
+    @pytest.mark.asyncio
+    async def test_drain_callback_without_credentials(self) -> None:
+        """VULNERABLE with callback that has no credentials → stays unenriched."""
+        config = _make_config(callback_timeout=0.05)
+        scanner = Scanner(config)
+
+        listener = AsyncListener(enable_http=False, enable_smb=False)
+        listener._loop = asyncio.get_running_loop()
+        scanner._listener = listener
+
+        scan_start = time.monotonic()
+
+        result = ScanResult(
+            target=TARGET_IP,
+            protocol="MS-RPRN",
+            method="RpcRemoteFindFirstPrinterChangeNotificationEx",
+            pipe=r"\PIPE\spoolss",
+            uuid="12345678-1234-abcd-ef00-0123456789ab",
+            result=TriggerResult.VULNERABLE,
+            transport="smb",
+            callback_received=True,
+            source_ip=TARGET_IP,
+        )
+        scanner.stats.add(result)
+
+        # Callback exists but has no credentials (handshake incomplete)
+        listener._ip_callback_times.setdefault(TARGET_IP, []).append(time.monotonic())
+        cb = _make_callback(
+            username="",
+            domain="",
+            ntlmv2_hash="",
+            transport="smb",
+        )
+        listener._ip_latest_callback[TARGET_IP] = cb
+
+        await scanner._drain_callbacks(scan_start)
+
+        # Result stays unenriched (callback has no username)
+        assert result.auth_user == ""
+        assert result.ntlmv2_hash == ""
+
+    @pytest.mark.asyncio
     async def test_drain_no_listener(self) -> None:
         """_drain_callbacks returns immediately if no listener."""
         config = _make_config(callback_timeout=0.05)
