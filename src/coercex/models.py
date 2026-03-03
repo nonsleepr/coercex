@@ -189,6 +189,7 @@ class ScanConfig:
     verbose: bool = False
     stop_on_vulnerable: bool = False
     delay: float = 0.0  # Seconds to wait between attempts per target (OPSEC)
+    discover_pipes: bool = False  # Enumerate IPC$ pipes before pre-flight probe
 
     @property
     def has_listener(self) -> bool:

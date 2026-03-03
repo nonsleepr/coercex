@@ -79,6 +79,9 @@ class Scanner:
         self._vulnerable_lock = asyncio.Lock()
         # Track reachable endpoints (pre-flight probe results)
         self._reachable: dict[str, set[tuple[str, str, str]]] = {}
+        # Track discovered pipes per target (pipe discovery results)
+        # Empty dict means discovery didn't run → no filtering applied.
+        self._available_pipes: dict[str, set[str]] = {}
 
     def _unc_port(self, transport: Transport) -> int:
         """Port to embed in UNC paths.
@@ -202,6 +205,83 @@ class Scanner:
 
         return self.stats
 
+    async def _discover_pipes(self) -> None:
+        """Enumerate named pipes on each target via IPC$ share listing.
+
+        Populates ``self._available_pipes`` so that ``_probe_endpoints()``
+        can skip bindings whose pipe is not present on the target.
+
+        Guards:
+        - Skipped when ``config.discover_pipes`` is False.
+        - Skipped when ``config.pipes_filter`` is set (explicit pipes forced).
+        - Skipped when no credentials are provided (anonymous IPC$ listing
+          almost always fails).
+        """
+        if not self.config.discover_pipes:
+            return
+        if self.config.pipes_filter:
+            log.info(
+                "Pipe discovery skipped: --pipes specified (forcing %s)",
+                self.config.pipes_filter,
+            )
+            return
+        creds = self.config.creds or Credentials()
+        if not creds.username:
+            log.warning(
+                "Pipe discovery skipped: no credentials provided "
+                "(IPC$ enumeration requires authentication)"
+            )
+            if self._display:
+                self._display._console.print(
+                    "  [yellow]Pipe discovery skipped:[/] "
+                    "no credentials (IPC$ enumeration requires authentication)"
+                )
+            return
+
+        from coercex.pipes import enumerate_pipes
+
+        targets = self.config.targets
+        total = len(targets)
+        log.info("Discovering pipes on %d target(s)", total)
+
+        if self._display:
+            self._display.start_pipe_discovery(total)
+        else:
+            self.console.print(f"[dim]Discovering pipes on {total} target(s)…[/]")
+
+        async def _discover_one(target: str) -> None:
+            async with self._semaphore:
+                pipes = await asyncio.to_thread(
+                    enumerate_pipes,
+                    target,
+                    creds,
+                    self.config.timeout,
+                )
+                if pipes:
+                    self._available_pipes[target] = pipes
+                    log.info(
+                        "Target %s: %d pipes discovered",
+                        target,
+                        len(pipes),
+                    )
+                else:
+                    log.info("Target %s: no pipes discovered", target)
+                if self._display:
+                    self._display.advance_pipe_discovery()
+
+        tasks = [asyncio.create_task(_discover_one(t)) for t in targets]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        if self._display:
+            self._display.finish_pipe_discovery(
+                {t: len(self._available_pipes.get(t, set())) for t in targets}
+            )
+        else:
+            for target in targets:
+                n = len(self._available_pipes.get(target, set()))
+                if n > 0:
+                    self.console.print(f"[dim]{target}: {n} pipes discovered[/]")
+
     async def _probe_endpoints(self, methods: list[CoercionMethod]) -> None:
         """Pre-flight probe: test connectivity to each unique (pipe, uuid, version).
 
@@ -223,7 +303,35 @@ class Scanner:
             PipeBinding(pipe=p, uuid=u, version=v) for p, u, v in unique_bindings
         ]
 
-        total_probes = len(self.config.targets) * len(binding_list)
+        # If pipe discovery ran, build per-target binding lists that only
+        # include bindings whose pipe was found on the target.  When
+        # _available_pipes is empty (discovery didn't run), every target
+        # gets the full binding list (current behaviour).
+        per_target_bindings: dict[str, list[PipeBinding]] = {}
+        if self._available_pipes:
+            for target in self.config.targets:
+                available = self._available_pipes.get(target)
+                if available is None:
+                    # Discovery ran but returned nothing for this target;
+                    # fall back to full list to avoid skipping everything.
+                    per_target_bindings[target] = binding_list
+                else:
+                    per_target_bindings[target] = [
+                        b for b in binding_list if b.pipe in available
+                    ]
+                    skipped = len(binding_list) - len(per_target_bindings[target])
+                    if skipped:
+                        log.info(
+                            "Target %s: skipping %d/%d bindings (pipe not present)",
+                            target,
+                            skipped,
+                            len(binding_list),
+                        )
+        else:
+            for target in self.config.targets:
+                per_target_bindings[target] = binding_list
+
+        total_probes = sum(len(bl) for bl in per_target_bindings.values())
         log.info("Pre-flight probing %d unique endpoints", len(binding_list))
 
         if self._display:
@@ -274,22 +382,23 @@ class Scanner:
         tasks = [
             asyncio.create_task(_probe_one(target, binding))
             for target in self.config.targets
-            for binding in binding_list
+            for binding in per_target_bindings[target]
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 
         # Report summary
         for target in self.config.targets:
             reachable_count = len(self._reachable.get(target, set()))
+            target_binding_count = len(per_target_bindings[target])
             log.info(
                 "Target %s: %d/%d endpoints reachable",
                 target,
                 reachable_count,
-                len(binding_list),
+                target_binding_count,
             )
             if not self._display and reachable_count > 0:
                 self.console.print(
-                    f"[dim]{target}: {reachable_count}/{len(binding_list)} endpoints reachable[/]"
+                    f"[dim]{target}: {reachable_count}/{target_binding_count} endpoints reachable[/]"
                 )
 
         if self._display:
@@ -304,6 +413,9 @@ class Scanner:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
         allowed = self.config.transport
         scan_start = time.monotonic()
+
+        # Optional pipe discovery (filters pre-flight probe set)
+        await self._discover_pipes()
 
         # Pre-flight probe to filter out unreachable endpoints
         await self._probe_endpoints(methods)
@@ -461,12 +573,19 @@ class Scanner:
 
     async def _run_coerce(self, methods: list[CoercionMethod]) -> None:
         """Coerce mode: fire each method once per transport, pointing at external relay."""
+        # Optional pipe discovery (filters bindings to present pipes)
+        await self._discover_pipes()
+
         tasks: list[asyncio.Task[None]] = []
         target_task_counts: dict[str, int] = {t: 0 for t in self.config.targets}
 
         for target in self.config.targets:
+            available = self._available_pipes.get(target)
             for method in methods:
                 for binding in method.pipe_bindings:
+                    # Skip bindings whose pipe is not present (if discovery ran)
+                    if available is not None and binding.pipe not in available:
+                        continue
                     for transport in self.config.transport:
                         task = asyncio.create_task(
                             self._attempt_coerce(target, method, binding, transport)

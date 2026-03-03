@@ -55,6 +55,7 @@ class ScanDisplay:
     """Rich Live display combining per-target progress bars and a findings table.
 
     Phases (in order):
+        pipes  — IPC$ pipe discovery (single progress bar, optional)
         probe  — pre-flight endpoint probing (single progress bar)
         scan   — trigger attempts (per-target progress bars)
         drain  — waiting for late callbacks
@@ -86,6 +87,17 @@ class ScanDisplay:
         self._printed_hashes: set[str] = set()
 
         self._phase: str = "init"
+
+        # Pipe discovery progress — single bar for IPC$ enumeration phase
+        self._pipes_progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]Discovering pipes"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        )
+        self._pipes_task_id: TaskID | None = None
 
         # Probe progress — single bar for the pre-flight phase
         self._probe_progress = Progress(
@@ -137,6 +149,37 @@ class ScanDisplay:
             self._live = None
 
     # -- Phase transitions ---------------------------------------------------
+
+    def start_pipe_discovery(self, total: int) -> None:
+        """Enter the pipe discovery phase."""
+        self._phase = "pipes"
+        self._pipes_task_id = self._pipes_progress.add_task("pipes", total=total)
+        self._refresh()
+
+    def advance_pipe_discovery(self) -> None:
+        """Advance the pipe discovery progress bar by one target."""
+        if self._pipes_task_id is not None:
+            self._pipes_progress.advance(self._pipes_task_id, 1)
+            self._refresh()
+
+    def finish_pipe_discovery(
+        self,
+        discovered: dict[str, int],
+    ) -> None:
+        """Finish pipe discovery phase and print per-target summary."""
+        if self._pipes_task_id is not None:
+            task = self._pipes_progress.tasks[0]
+            self._pipes_progress.update(self._pipes_task_id, completed=task.total)
+
+        for target in self._targets:
+            n = discovered.get(target, 0)
+            if n == 0:
+                self._console.print(f"  [dim]{target}: no pipes discovered[/]")
+            else:
+                self._console.print(f"  {target}: [bold]{n}[/] pipes discovered")
+
+        self._phase = "probe"
+        self._refresh()
 
     def start_probe(self, total: int) -> None:
         """Enter the pre-flight probe phase."""
@@ -408,7 +451,9 @@ class ScanDisplay:
             parts.append(table)
 
         # Phase-specific progress section
-        if self._phase == "probe":
+        if self._phase == "pipes":
+            parts.append(self._pipes_progress)
+        elif self._phase == "probe":
             parts.append(self._probe_progress)
         elif self._phase in ("scan", "drain", "done"):
             parts.append(self._scan_progress)

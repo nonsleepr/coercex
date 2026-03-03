@@ -127,3 +127,15 @@ DelayOpt = Annotated[
         ),
     ),
 ]
+DiscoverPipesOpt = Annotated[
+    bool,
+    typer.Option(
+        "--discover-pipes",
+        help=(
+            "Enumerate named pipes on each target via IPC$ share before scanning. "
+            "Filters methods to only those whose pipes are present on the target. "
+            "Requires credentials (skipped for anonymous). "
+            "Ignored when --pipes is specified (explicit pipes are forced instead)."
+        ),
+    ),
+]
