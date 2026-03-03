@@ -605,9 +605,9 @@ class AsyncListener:
             if ntlm_type3_raw[:8] == b"NTLMSSP\x00":
                 msg_type = int.from_bytes(ntlm_type3_raw[8:12], "little")
                 if msg_type != 3:
-                    log.warning(
+                    log.debug(
                         "SESSION_SETUP from %s: expected NTLM Type 3 (AUTHENTICATE), got Type %d — "
-                        "client sent wrong message type (likely protocol confusion or race)",
+                        "new NTLM negotiation on existing SMB session (concurrent coercion race)",
                         src_ip,
                         msg_type,
                     )

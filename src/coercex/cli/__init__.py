@@ -156,7 +156,7 @@ def _setup_logging(*, verbose: bool = False, debug: bool = False) -> None:
         markup=False,
         keywords=[],
     )
-    logging.basicConfig(level=level, handlers=[handler])
+    logging.basicConfig(level=level, handlers=[handler], format="%(message)s")
     if not debug:
         logging.getLogger("impacket").setLevel(logging.WARNING)
 
