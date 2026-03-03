@@ -33,7 +33,12 @@ NOT_AVAILABLE_CODES = {
 
 def classify_error(error: Exception) -> TriggerResult:
     """Classify a DCERPC error into a TriggerResult."""
-    err_str = str(error).lower()
+    try:
+        err_str = str(error).lower()
+    except Exception:
+        # impacket's DCERPCException.__str__ crashes with TypeError when
+        # both error_string and error_code are None (%x on None).
+        err_str = type(error).__name__.lower()
 
     # Check for connection/timeout errors
     if any(s in err_str for s in ["timed out", "timeout", "connection refused"]):
@@ -95,6 +100,6 @@ def classify_error(error: Exception) -> TriggerResult:
     import logging
 
     log = logging.getLogger("coercex.errors")
-    log.warning("Unknown error classification: %s", str(error)[:200])
+    log.warning("Unknown error classification: %s", err_str[:200])
 
     return TriggerResult.UNKNOWN_ERROR
