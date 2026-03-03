@@ -42,6 +42,10 @@ from coercex.unc import build_unc_path
 
 log = logging.getLogger("coercex.scanner")
 
+# Extended timeout (seconds) for the second wait_for when a connection was
+# detected but the TREE_CONNECT share-path token hasn't arrived yet.
+_TREE_CONNECT_EXTENDED_TIMEOUT = 10.0
+
 
 class Scanner:
     """Orchestrates the coercion pipeline.
@@ -623,9 +627,12 @@ class Scanner:
                     ):
                         # Two-stage await for token-based correlation:
                         # Stage 1: Normal timeout (callback_timeout)
+                        # Use shield() so the future is NOT cancelled on
+                        # timeout — we may re-await it in Stage 2.
                         try:
                             callback = await asyncio.wait_for(
-                                future, timeout=self.config.callback_timeout
+                                asyncio.shield(future),
+                                timeout=self.config.callback_timeout,
                             )
                             # Token-based resolution succeeded
                             result.callback_received = True
@@ -650,7 +657,7 @@ class Scanner:
                                 try:
                                     callback = await asyncio.wait_for(
                                         future,
-                                        timeout=10.0,  # Extended timeout for TREE_CONNECT
+                                        timeout=_TREE_CONNECT_EXTENDED_TIMEOUT,
                                     )
                                     # Token resolved via TREE_CONNECT after extended wait
                                     result.callback_received = True
