@@ -313,15 +313,17 @@ class TestAttemptCallbackWait:
 
 
 class TestAttemptTimestampFallback:
-    """_attempt does NOT use timestamp fallback when token resolution times
-    out -- this prevents false positives across transports/methods."""
+    """_attempt uses get_callback_since when token resolution times out but
+    has_connection_from returns True (target connected but stripped token
+    from TREE_CONNECT path).  The fallback uses t_before (per-attempt
+    scoped) not scan_start, so it is tightly bounded."""
 
     @pytest.mark.asyncio
-    async def test_no_timestamp_fallback_stays_accessible(self) -> None:
-        """ACCESSIBLE + timeout + has_connection but no token → stays ACCESSIBLE.
+    async def test_timestamp_fallback_upgrades_to_vulnerable(self) -> None:
+        """ACCESSIBLE + timeout + has_connection + get_callback_since → VULNERABLE.
 
-        Previously this would fall back to get_callback_since() and upgrade
-        to VULNERABLE, causing cross-transport false positives.
+        When the target connects back but the token can't be extracted from
+        TREE_CONNECT, the per-attempt timestamp fallback upgrades the result.
         """
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
@@ -374,9 +376,9 @@ class TestAttemptTimestampFallback:
 
         assert len(scanner.stats.results) == 1
         result = scanner.stats.results[0]
-        # Result stays ACCESSIBLE — no timestamp fallback upgrade
-        assert result.result == TriggerResult.ACCESSIBLE
-        assert result.callback_received is False
+        assert result.result == TriggerResult.VULNERABLE
+        assert result.callback_received is True
+        assert result.auth_user == "CORP\\DC01$"
 
 
 # ---------------------------------------------------------------------------

@@ -729,18 +729,41 @@ class Scanner:
                                         method.function_name,
                                     )
                                 except asyncio.TimeoutError:
-                                    # TREE_CONNECT never arrived — leave result
-                                    # as-is.  We do NOT fall back to timestamp-
-                                    # based correlation here because it cannot
-                                    # distinguish which concurrent trigger
-                                    # caused the callback (would cause false
-                                    # positives across transports/methods).
-                                    log.debug(
-                                        "Extended wait timed out for %s %s::%s — no token resolution",
-                                        target,
-                                        method.protocol_short,
-                                        method.function_name,
-                                    )
+                                    # TREE_CONNECT never arrived — token
+                                    # resolution failed.  Fall back to
+                                    # timestamp-based correlation.  This is
+                                    # safe here because t_before is scoped
+                                    # to this attempt and
+                                    # has_connection_from() already proved
+                                    # the target connected after our
+                                    # trigger.  (Some targets strip the
+                                    # token from the TREE_CONNECT path.)
+                                    cb = listener.get_callback_since(target, t_before)
+                                    if cb is not None:
+                                        result.callback_received = True
+                                        result.source_ip = cb.source_ip
+                                        result.result = TriggerResult.VULNERABLE
+                                        if cb.ntlmv2_hash:
+                                            result.ntlmv2_hash = cb.ntlmv2_hash
+                                        if cb.username:
+                                            result.auth_user = (
+                                                f"{cb.domain}\\{cb.username}"
+                                                if cb.domain
+                                                else cb.username
+                                            )
+                                        log.debug(
+                                            "Timestamp fallback resolved %s %s::%s",
+                                            target,
+                                            method.protocol_short,
+                                            method.function_name,
+                                        )
+                                    else:
+                                        log.debug(
+                                            "Extended wait timed out for %s %s::%s — no callback data",
+                                            target,
+                                            method.protocol_short,
+                                            method.function_name,
+                                        )
                             else:
                                 # No connection at all — target didn't call back
                                 log.debug(
