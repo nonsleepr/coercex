@@ -313,12 +313,16 @@ class TestAttemptCallbackWait:
 
 
 class TestAttemptTimestampFallback:
-    """_attempt uses get_callback_since when token resolution times out but
-    has_connection_from returns True."""
+    """_attempt does NOT use timestamp fallback when token resolution times
+    out -- this prevents false positives across transports/methods."""
 
     @pytest.mark.asyncio
-    async def test_timestamp_fallback_upgrades_to_vulnerable(self) -> None:
-        """ACCESSIBLE + timeout + has_connection + get_callback_since → VULNERABLE."""
+    async def test_no_timestamp_fallback_stays_accessible(self) -> None:
+        """ACCESSIBLE + timeout + has_connection but no token → stays ACCESSIBLE.
+
+        Previously this would fall back to get_callback_since() and upgrade
+        to VULNERABLE, causing cross-transport false positives.
+        """
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -370,9 +374,9 @@ class TestAttemptTimestampFallback:
 
         assert len(scanner.stats.results) == 1
         result = scanner.stats.results[0]
-        assert result.result == TriggerResult.VULNERABLE
-        assert result.callback_received is True
-        assert result.auth_user == "CORP\\DC01$"
+        # Result stays ACCESSIBLE — no timestamp fallback upgrade
+        assert result.result == TriggerResult.ACCESSIBLE
+        assert result.callback_received is False
 
 
 # ---------------------------------------------------------------------------
@@ -381,11 +385,16 @@ class TestAttemptTimestampFallback:
 
 
 class TestDrainCallbacks:
-    """_drain_callbacks sweeps ACCESSIBLE and UNKNOWN_ERROR results."""
+    """_drain_callbacks only enriches VULNERABLE results missing auth_user.
+
+    It no longer upgrades ACCESSIBLE/UNKNOWN_ERROR → VULNERABLE because
+    timestamp-based correlation cannot distinguish which concurrent trigger
+    caused a callback (cross-transport/cross-method false positives).
+    """
 
     @pytest.mark.asyncio
-    async def test_drain_upgrades_accessible_to_vulnerable(self) -> None:
-        """ACCESSIBLE result upgraded to VULNERABLE if callback arrived late."""
+    async def test_drain_does_not_upgrade_accessible(self) -> None:
+        """ACCESSIBLE result stays ACCESSIBLE even if callback arrived late."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -413,15 +422,15 @@ class TestDrainCallbacks:
 
         await scanner._drain_callbacks(scan_start)
 
-        assert result.result == TriggerResult.VULNERABLE
-        assert result.callback_received is True
-        assert result.auth_user == "CORP\\DC01$"
-        assert scanner.stats.vulnerable == 1
-        assert scanner.stats.accessible == 0  # decremented
+        # No upgrade — result stays ACCESSIBLE
+        assert result.result == TriggerResult.ACCESSIBLE
+        assert result.callback_received is False
+        assert scanner.stats.vulnerable == 0
+        assert scanner.stats.accessible == 1
 
     @pytest.mark.asyncio
-    async def test_drain_upgrades_unknown_error_to_vulnerable(self) -> None:
-        """UNKNOWN_ERROR result upgraded to VULNERABLE if callback arrived late."""
+    async def test_drain_does_not_upgrade_unknown_error(self) -> None:
+        """UNKNOWN_ERROR result stays UNKNOWN_ERROR even if callback arrived late."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -448,14 +457,15 @@ class TestDrainCallbacks:
 
         await scanner._drain_callbacks(scan_start)
 
-        assert result.result == TriggerResult.VULNERABLE
-        assert result.callback_received is True
-        assert scanner.stats.vulnerable == 1
-        assert scanner.stats.unknown_errors == 0  # decremented
+        # No upgrade — result stays UNKNOWN_ERROR
+        assert result.result == TriggerResult.UNKNOWN_ERROR
+        assert result.callback_received is False
+        assert scanner.stats.vulnerable == 0
+        assert scanner.stats.unknown_errors == 1
 
     @pytest.mark.asyncio
     async def test_drain_skips_when_no_drainable_results(self) -> None:
-        """_drain_callbacks returns early if no ACCESSIBLE/UNKNOWN_ERROR results."""
+        """_drain_callbacks returns early if no VULNERABLE results missing auth_user."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 

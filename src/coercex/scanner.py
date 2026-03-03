@@ -483,7 +483,7 @@ class Scanner:
     # ── DRAIN: wait for late callbacks after all tasks complete ──────
 
     async def _drain_callbacks(self, scan_start: float) -> None:
-        """Wait for late callbacks and enrich results.
+        """Wait for late callbacks and enrich VULNERABLE results.
 
         After all ``_attempt()`` tasks complete, ongoing SMB handshakes
         may still be running in the listener.  The per-attempt
@@ -492,17 +492,19 @@ class Scanner:
 
         This method:
         1. Sleeps ``callback_timeout`` seconds so handshakes can finish.
-        2. Sweeps ACCESSIBLE results → upgrades to VULNERABLE if a
-           callback arrived from that target.
-        3. Sweeps VULNERABLE results with empty ``auth_user`` → enriches
+        2. Sweeps VULNERABLE results with empty ``auth_user`` → enriches
            them with NTLM credentials from the completed handshake.
+
+        Note: we intentionally do NOT upgrade ACCESSIBLE/UNKNOWN_ERROR
+        results to VULNERABLE here.  Timestamp-based correlation cannot
+        distinguish which concurrent trigger caused a callback, leading
+        to false positives across transports/methods.
         """
         if not self._listener:
             return
 
         needs_drain = any(
-            r.result in (TriggerResult.ACCESSIBLE, TriggerResult.UNKNOWN_ERROR)
-            or (r.result == TriggerResult.VULNERABLE and not r.auth_user)
+            r.result == TriggerResult.VULNERABLE and not r.auth_user
             for r in self.stats.results
         )
         if not needs_drain:
@@ -522,33 +524,7 @@ class Scanner:
 
         listener = self._listener
         for result in self.stats.results:
-            if result.result in (
-                TriggerResult.ACCESSIBLE,
-                TriggerResult.UNKNOWN_ERROR,
-            ):
-                cb = listener.get_callback_since(result.target, scan_start)
-                if cb is not None:
-                    prev = result.result
-                    result.result = TriggerResult.VULNERABLE
-                    result.callback_received = True
-                    result.source_ip = cb.source_ip
-                    if cb.username:
-                        result.auth_user = (
-                            f"{cb.domain}\\{cb.username}" if cb.domain else cb.username
-                        )
-                    if cb.ntlmv2_hash:
-                        result.ntlmv2_hash = cb.ntlmv2_hash
-                    self.stats.vulnerable += 1
-                    if prev == TriggerResult.ACCESSIBLE:
-                        self.stats.accessible -= 1
-                    else:
-                        self.stats.unknown_errors -= 1
-                    if self._display:
-                        self._display.result_upgraded(result, prev)
-                    else:
-                        self._emit(result)
-
-            elif result.result == TriggerResult.VULNERABLE and not result.auth_user:
+            if result.result == TriggerResult.VULNERABLE and not result.auth_user:
                 # Callback arrived but handshake wasn't done yet.
                 # Now the handshake may have completed; re-check.
                 cb = listener.get_callback_since(result.target, scan_start)
@@ -753,28 +729,18 @@ class Scanner:
                                         method.function_name,
                                     )
                                 except asyncio.TimeoutError:
-                                    # TREE_CONNECT never arrived — fall back to timestamp
-                                    fallback = listener.get_callback_since(
-                                        target, t_before
+                                    # TREE_CONNECT never arrived — leave result
+                                    # as-is.  We do NOT fall back to timestamp-
+                                    # based correlation here because it cannot
+                                    # distinguish which concurrent trigger
+                                    # caused the callback (would cause false
+                                    # positives across transports/methods).
+                                    log.debug(
+                                        "Extended wait timed out for %s %s::%s — no token resolution",
+                                        target,
+                                        method.protocol_short,
+                                        method.function_name,
                                     )
-                                    if fallback is not None:
-                                        result.callback_received = True
-                                        result.result = TriggerResult.VULNERABLE
-                                        result.source_ip = fallback.source_ip
-                                        if fallback.ntlmv2_hash:
-                                            result.ntlmv2_hash = fallback.ntlmv2_hash
-                                        if fallback.username:
-                                            result.auth_user = (
-                                                f"{fallback.domain}\\{fallback.username}"
-                                                if fallback.domain
-                                                else fallback.username
-                                            )
-                                        log.debug(
-                                            "Timestamp fallback: %s %s::%s upgraded to VULNERABLE",
-                                            target,
-                                            method.protocol_short,
-                                            method.function_name,
-                                        )
                             else:
                                 # No connection at all — target didn't call back
                                 log.debug(
