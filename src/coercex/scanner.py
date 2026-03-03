@@ -19,10 +19,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from coercex.connection import DCERPCPool
+
+if TYPE_CHECKING:
+    from coercex.cli.display import ScanDisplay
 from coercex.listener import AsyncListener
 from coercex.methods import get_all_methods
 from coercex.methods.base import CoercionMethod, PipeBinding
@@ -55,9 +59,15 @@ class Scanner:
         stats = await scanner.run()
     """
 
-    def __init__(self, config: ScanConfig, console: Console | None = None):
+    def __init__(
+        self,
+        config: ScanConfig,
+        console: Console | None = None,
+        display: ScanDisplay | None = None,
+    ):
         self.config = config
         self.console = console or Console(stderr=True)
+        self._display = display
         self.stats = ScanStats()
         self._pool: DCERPCPool | None = None
         self._listener: AsyncListener | None = None
@@ -171,11 +181,17 @@ class Scanner:
             )
 
         try:
+            # Start live display after setup messages
+            if self._display:
+                self._display.start()
+
             if self.config.mode == Mode.SCAN:
                 await self._run_scan(methods)
             elif self.config.mode == Mode.COERCE:
                 await self._run_coerce(methods)
         finally:
+            if self._display:
+                self._display.stop()
             if self._pool:
                 await self._pool.close_all()
             if self._listener:
@@ -207,11 +223,16 @@ class Scanner:
             PipeBinding(pipe=p, uuid=u, version=v) for p, u, v in unique_bindings
         ]
 
+        total_probes = len(self.config.targets) * len(binding_list)
         log.info("Pre-flight probing %d unique endpoints", len(binding_list))
-        self.console.print(
-            f"[dim]Probing {len(binding_list)} unique endpoints "
-            f"({len(self.config.targets)} targets)…[/]"
-        )
+
+        if self._display:
+            self._display.start_probe(total_probes)
+        else:
+            self.console.print(
+                f"[dim]Probing {len(binding_list)} unique endpoints "
+                f"({len(self.config.targets)} targets)…[/]"
+            )
 
         async def _probe_one(target: str, binding: PipeBinding) -> None:
             """Probe a single (target, binding) pair."""
@@ -245,6 +266,9 @@ class Scanner:
                             target,
                             e.__class__.__name__,
                         )
+                finally:
+                    if self._display:
+                        self._display.advance_probe()
 
         # Run all probes concurrently
         tasks = [
@@ -263,10 +287,13 @@ class Scanner:
                 reachable_count,
                 len(binding_list),
             )
-            if reachable_count > 0:
+            if not self._display and reachable_count > 0:
                 self.console.print(
                     f"[dim]{target}: {reachable_count}/{len(binding_list)} endpoints reachable[/]"
                 )
+
+        if self._display:
+            self._display.finish_probe()
 
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
@@ -298,6 +325,26 @@ class Scanner:
         Only tries the default path_style (first in path_styles list) to minimize noise.
         """
         remaining = set(self.config.targets)
+
+        # Set per-target totals (max possible: all methods × reachable bindings, default path_style only)
+        if self._display:
+            for target in self.config.targets:
+                count = 0
+                reachable = self._reachable.get(target, set())
+                for method in methods:
+                    if not method.path_styles:
+                        continue
+                    transport_name, _ = method.path_styles[0]
+                    transport = (
+                        Transport.HTTP if transport_name == "http" else Transport.SMB
+                    )
+                    if transport not in allowed:
+                        continue
+                    for binding in method.pipe_bindings:
+                        key = (binding.pipe, binding.uuid, binding.version)
+                        if key in reachable:
+                            count += 1
+                self._display.set_target_total(target, count)
 
         for method in methods:
             if not remaining:
@@ -366,6 +413,8 @@ class Scanner:
         identify every vulnerable method.
         """
         all_tasks: list[asyncio.Task[None]] = []
+        # Track per-target task counts for the display
+        target_task_counts: dict[str, int] = {t: 0 for t in self.config.targets}
 
         for target in self.config.targets:
             reachable = self._reachable.get(target, set())
@@ -393,6 +442,12 @@ class Scanner:
                             )
                         )
                         all_tasks.append(task)
+                        target_task_counts[target] += 1
+
+        # Set per-target totals on the display
+        if self._display:
+            for target, count in target_task_counts.items():
+                self._display.set_target_total(target, count)
 
         log.debug("Parallel scan: %d total tasks created", len(all_tasks))
         await asyncio.gather(*all_tasks, return_exceptions=True)
@@ -402,6 +457,7 @@ class Scanner:
     async def _run_coerce(self, methods: list[CoercionMethod]) -> None:
         """Coerce mode: fire each method once per transport, pointing at external relay."""
         tasks: list[asyncio.Task[None]] = []
+        target_task_counts: dict[str, int] = {t: 0 for t in self.config.targets}
 
         for target in self.config.targets:
             for method in methods:
@@ -411,6 +467,11 @@ class Scanner:
                             self._attempt_coerce(target, method, binding, transport)
                         )
                         tasks.append(task)
+                        target_task_counts[target] += 1
+
+        if self._display:
+            for target, count in target_task_counts.items():
+                self._display.set_target_total(target, count)
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -446,9 +507,12 @@ class Scanner:
             "Drain: waiting %ss for late callbacks / handshake completion",
             self.config.callback_timeout,
         )
-        self.console.print(
-            f"[dim]Waiting {self.config.callback_timeout:.0f}s for late callbacks…[/]"
-        )
+        if self._display:
+            self._display.start_drain()
+        else:
+            self.console.print(
+                f"[dim]Waiting {self.config.callback_timeout:.0f}s for late callbacks…[/]"
+            )
         await asyncio.sleep(self.config.callback_timeout)
 
         listener = self._listener
@@ -474,7 +538,10 @@ class Scanner:
                         self.stats.accessible -= 1
                     else:
                         self.stats.unknown_errors -= 1
-                    self._emit(result)
+                    if self._display:
+                        self._display.result_upgraded(result, prev)
+                    else:
+                        self._emit(result)
 
             elif result.result == TriggerResult.VULNERABLE and not result.auth_user:
                 # Callback arrived but handshake wasn't done yet.
@@ -728,6 +795,8 @@ class Scanner:
                         method.protocol_short,
                         method.function_name,
                     )
+                    if self._display:
+                        self._display.mark_target_done(target, "vulnerable")
 
                 self.stats.add(result)
                 self._emit(result)
@@ -743,7 +812,14 @@ class Scanner:
             raise
 
     def _emit(self, result: ScanResult) -> None:
-        """Print a result line (only for interesting results unless verbose)."""
+        """Report a result to the live display or fallback to console lines."""
+        if self._display:
+            self._display.add_result(result)
+            return
+        self._emit_line(result)
+
+    def _emit_line(self, result: ScanResult) -> None:
+        """Legacy per-line output (used when no live display is attached)."""
         show = self.config.verbose or result.result in (
             TriggerResult.VULNERABLE,
             TriggerResult.ACCESSIBLE,

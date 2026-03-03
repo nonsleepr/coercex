@@ -320,9 +320,15 @@ def coerce(
 
 async def _run(config: ScanConfig) -> ScanStats:
     """Async entry point for the scanner."""
+    from coercex.cli.display import ScanDisplay
     from coercex.scanner import Scanner
 
-    scanner = Scanner(config, console=console)
+    display = ScanDisplay(
+        console=console,
+        targets=config.targets,
+        verbose=config.verbose,
+    )
+    scanner = Scanner(config, console=console, display=display)
     return await scanner.run()
 
 
