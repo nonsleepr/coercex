@@ -92,12 +92,30 @@ class TestPhaseTransitions:
         d.finish_probe()
         assert d._phase == "scan"
 
+    def test_finish_probe_with_reachable_info(self) -> None:
+        d = _make_display(["10.0.0.1", "10.0.0.2"])
+        d.start_probe(10)
+        d.advance_probe(10)
+        d.finish_probe(
+            reachable={"10.0.0.1": 9, "10.0.0.2": 0},
+            total_bindings=11,
+        )
+        assert d._phase == "scan"
+
     def test_start_drain_sets_phase(self) -> None:
         d = _make_display()
         d.start_probe(1)
         d.finish_probe()
         d.start_drain()
         assert d._phase == "drain"
+
+    def test_finish_drain_sets_done_phase(self) -> None:
+        d = _make_display()
+        d.start_probe(1)
+        d.finish_probe()
+        d.start_drain()
+        d.finish_drain()
+        assert d._phase == "done"
 
     def test_advance_probe_without_start_is_noop(self) -> None:
         d = _make_display()
@@ -141,6 +159,14 @@ class TestBuildLayout:
             isinstance(r, Text) and "Waiting for late callbacks" in str(r)
             for r in renderables
         )
+
+    def test_done_phase_shows_progress_without_waiting(self) -> None:
+        d = _make_display()
+        d._phase = "done"
+        layout = d._build_layout()
+        renderables = list(layout.renderables)
+        assert any(isinstance(r, Progress) for r in renderables)
+        assert not any(isinstance(r, Text) and "Waiting" in str(r) for r in renderables)
 
     def test_no_results_table_when_empty(self) -> None:
         d = _make_display()
@@ -552,7 +578,11 @@ class TestEndToEndFlow:
         # Still 2 interesting results (the object was mutated in place)
         assert len(d._interesting_results) == 2
 
-        # 7. Stop
+        # 7. Finish drain — removes "Waiting…" text
+        d.finish_drain()
+        assert d._phase == "done"
+
+        # 8. Stop
         d.stop()
         assert d._live is None
 

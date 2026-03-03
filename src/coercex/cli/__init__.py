@@ -137,8 +137,13 @@ def _build_creds(
     return creds
 
 
-def _setup_logging(debug: bool) -> None:
-    level = logging.DEBUG if debug else logging.INFO
+def _setup_logging(*, verbose: bool = False, debug: bool = False) -> None:
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -208,7 +213,7 @@ def scan(
     If -l is not given, the listener IP is auto-detected from the
     default network route.
     """
-    _setup_logging(debug)
+    _setup_logging(verbose=verbose, debug=debug)
 
     targets = _parse_targets(target, targets_file)
     if not targets:
@@ -286,7 +291,7 @@ def coerce(
     Use --methods / --pipes / --protocols to target specific
     vulnerabilities found during scan. Without filters, tries all methods.
     """
-    _setup_logging(debug)
+    _setup_logging(verbose=verbose, debug=debug)
 
     targets = _parse_targets(target, targets_file)
     if not targets:

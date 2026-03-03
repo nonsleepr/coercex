@@ -149,17 +149,40 @@ class ScanDisplay:
             self._probe_progress.advance(self._probe_task_id, advance)
             self._refresh()
 
-    def finish_probe(self) -> None:
-        """Finish probe phase and switch to scan phase."""
+    def finish_probe(
+        self,
+        reachable: dict[str, int] | None = None,
+        total_bindings: int = 0,
+    ) -> None:
+        """Finish probe phase, print summary, and switch to scan phase."""
         if self._probe_task_id is not None:
             task = self._probe_progress.tasks[0]
             self._probe_progress.update(self._probe_task_id, completed=task.total)
+
+        # Print probe summary above the live display
+        if reachable is not None:
+            for target in self._targets:
+                n = reachable.get(target, 0)
+                if n == 0:
+                    self._console.print(
+                        f"  [dim]{target}: 0/{total_bindings} endpoints reachable[/]"
+                    )
+                else:
+                    self._console.print(
+                        f"  {target}: [bold]{n}[/]/{total_bindings} endpoints reachable"
+                    )
+
         self._phase = "scan"
         self._refresh()
 
     def start_drain(self) -> None:
         """Enter the drain phase (waiting for late callbacks)."""
         self._phase = "drain"
+        self._refresh()
+
+    def finish_drain(self) -> None:
+        """Leave the drain phase — removes the 'Waiting…' text."""
+        self._phase = "done"
         self._refresh()
 
     # -- Target management ---------------------------------------------------
@@ -219,7 +242,10 @@ class ScanDisplay:
 
         # Print captured hash above the live display
         if result.ntlmv2_hash:
-            self._console.print(f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}")
+            self._console.print(
+                f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
+                highlight=False,
+            )
 
         self._refresh()
 
@@ -261,7 +287,10 @@ class ScanDisplay:
                 f"{auth}"
             )
         if result.ntlmv2_hash:
-            self._console.print(f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}")
+            self._console.print(
+                f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
+                highlight=False,
+            )
 
         self._refresh()
 
@@ -376,7 +405,7 @@ class ScanDisplay:
         # Phase-specific progress section
         if self._phase == "probe":
             parts.append(self._probe_progress)
-        elif self._phase in ("scan", "drain"):
+        elif self._phase in ("scan", "drain", "done"):
             parts.append(self._scan_progress)
             if self._phase == "drain":
                 parts.append(

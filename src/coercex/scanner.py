@@ -293,7 +293,12 @@ class Scanner:
                 )
 
         if self._display:
-            self._display.finish_probe()
+            self._display.finish_probe(
+                reachable={
+                    t: len(self._reachable.get(t, set())) for t in self.config.targets
+                },
+                total_bindings=len(binding_list),
+            )
 
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
         """Scan mode: try all path styles per method to detect vulnerabilities."""
@@ -553,6 +558,9 @@ class Scanner:
                     )
                     if cb.ntlmv2_hash and not result.ntlmv2_hash:
                         result.ntlmv2_hash = cb.ntlmv2_hash
+
+        if self._display:
+            self._display.finish_drain()
 
     async def _attempt_coerce(
         self,
@@ -842,4 +850,7 @@ class Scanner:
                 f"via [dim]{result.pipe}[/]{tr}{cb}{auth}{err}"
             )
             if result.ntlmv2_hash:
-                self.console.print(f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}")
+                self.console.print(
+                    f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
+                    highlight=False,
+                )
