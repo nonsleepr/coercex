@@ -78,6 +78,10 @@ def classify_error(error: Exception) -> TriggerResult:
     if "object_name_not_found" in err_str:
         return TriggerResult.ACCESSIBLE
 
+    # Bad stub data — server rejected NDR encoding (parameter mismatch)
+    if "rpc_x_bad_stub_data" in err_str or "bad_stub_data" in err_str:
+        return TriggerResult.NOT_AVAILABLE
+
     # Null parameter errors - method signature incompatibility
     if "cannot be null" in err_str or "pclientinfo cannot be null" in err_str:
         return TriggerResult.NOT_AVAILABLE
