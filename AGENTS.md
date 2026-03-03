@@ -91,34 +91,56 @@ No `[tool.ruff]` or `[tool.mypy]` config exists; tools run with defaults.
 
 ## Tests
 
-No test suite exists yet.  When adding tests:
-
 ```bash
-# Add pytest as a dev dependency
-uv add --dev pytest pytest-asyncio
-
-# Run all tests
+# Run all tests (186 tests)
 uv run pytest
 
+# Run all tests with verbose output
+uv run pytest -xvs
+
+# Run a single test file
+uv run pytest tests/test_display.py -v
+
 # Run a single test
-uv run pytest tests/test_foo.py::test_bar -v
+uv run pytest tests/test_scanner_attempt.py::test_drain_enriches_vulnerable_missing_auth -v
+
+# Run tests matching a keyword
+uv run pytest -k "drain" -v
 ```
 
-Place tests under `tests/` at the repo root, mirroring `src/coercex/` layout.
-Use `pytest-asyncio` for any async test functions.
+Tests live under `tests/` at the repo root:
+
+```
+tests/
+  test_display.py            ScanDisplay widget (41 tests)
+  test_scanner_attempt.py    _attempt() and _drain_callbacks() (53 tests)
+  test_listener.py           Listener core (SMB/HTTP handlers)
+  test_listener_callback.py  Callback correlation and token resolution
+  test_listener_race.py      Race conditions in concurrent callbacks
+  test_errors.py             classify_error() mapping
+  test_methods.py            Method registry and filtering
+  test_ms_rprn.py            MS-RPRN method specifics
+  test_utils.py              Utility functions
+```
+
+Use `pytest-asyncio` for any async test functions (already a dev dependency).
 
 ## Project Layout
 
 ```
 src/coercex/
-  cli.py          Typer CLI (scan + coerce commands, Rich output)
-  connection.py   DCERPCPool, trigger_method(), async connection pooling
-  listener.py     SMB2 + HTTP listener, NTLM token correlation, hash capture
-  scanner.py      Scan/coerce orchestrator, semaphore-bounded async pipeline
-  redirect.py     Port redirect: pydivert (Windows only)
-  utils.py        TriggerResult enum, ScanResult, dataclasses, classify_error()
+  cli/
+    __init__.py   Typer CLI (scan + coerce commands), _setup_logging() with RichHandler
+    display.py    ScanDisplay: Rich Live TUI with progress bars, findings table, phases
+    options.py    Typer option type aliases (Annotated helpers)
+    output.py     JSON/file output (post-scan serialization)
+  listener/
+    __init__.py   Async HTTP + SMB listener, token correlation, hash capture, AuthCallback
+    ntlm.py       NTLM challenge/response parsing, Net-NTLMv2 hash extraction
+    smb2.py       SMB2 protocol constants and packet structures
   methods/
-    base.py       CoercionMethod dataclass, METHODS registry
+    __init__.py   METHODS registry, get_methods() filtering
+    base.py       CoercionMethod dataclass, PathStyle type
     ms_efsr.py    10 methods  (MS-EFSR / EfsRpc*)
     ms_rprn.py    2 methods   (MS-RPRN / RpcRemoteFindFirstPrinterChangeNotification*)
     ms_dfsnm.py   2 methods   (MS-DFSNM / NetrDfsAddStdRoot, NetrDfsRemoveStdRoot)
@@ -126,6 +148,14 @@ src/coercex/
     ms_even.py    1 method    (MS-EVEN / ElfrOpenBELW)
     ms_par.py     1 method    (MS-PAR / RpcAsyncOpenPrinter)
     ms_tsch.py    1 method    (MS-TSCH / SchRpcRegisterTask)
+  scanner.py      Scan/coerce orchestrator, pre-flight probing, callback correlation
+  connection.py   DCERPCPool, trigger_method(), async connection pooling, double-lock
+  models.py       ScanConfig, ScanResult, ScanStats dataclasses
+  errors.py       classify_error() mapping DCERPC errors to TriggerResult
+  utils.py        TriggerResult enum, Transport enum, helper functions
+  net.py          Network utilities (auto-detect listener IP)
+  unc.py          UNC path generation (SMB, HTTP/WebDAV formats)
+  redirect.py     Port redirect: pydivert (Windows only)
 ```
 
 ## Code Style
@@ -232,9 +262,11 @@ redirector transparently forwards inbound traffic from 445 to 4445.
 - **Connection pooling** -- `DCERPCPool` in `connection.py` keys sessions by
   `(target, pipe, uuid)`.  A double-lock pattern prevents duplicate
   connections to the same endpoint.
-- **Callback correlation** -- Primary: token-based (embedded in NTLM
-  challenge).  Fallback: IP-based FIFO with timestamps.  The fallback
-  exists because some targets strip or ignore the token.
+- **Callback correlation** -- Three layers: (1) token-based via UNC path
+  (primary), (2) IP-based FIFO for HTTP handler, (3) timestamp + IP
+  fallback in `_attempt()` with transport check to prevent cross-transport
+  false positives.  Drain enrichment only upgrades VULNERABLE results
+  missing credentials -- no ACCESSIBLE/UNKNOWN_ERROR sweeps.
 - **`--transport` accepts multiple values** -- scan/coerce can try both SMB
   and HTTP simultaneously.
 - **19 methods across 7 protocols** -- all defined declaratively in

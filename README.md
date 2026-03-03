@@ -2,6 +2,8 @@
 
 Async NTLM authentication coercion scanner. A high-performance replacement for Coercer and PetitPotam.
 
+![coercex demo](assets/demo.gif)
+
 ## Features
 
 - **19 coercion methods** across 7 protocols: MS-EFSR (10), MS-RPRN (2), MS-DFSNM (2), MS-FSRVP (2), MS-EVEN (1), MS-PAR (1), MS-TSCH (1)
@@ -13,12 +15,12 @@ Async NTLM authentication coercion scanner. A high-performance replacement for C
 - **WebDAV transport** support (`\\host@port\share` format) to bypass SMB signing
 - **Port redirect** via pydivert (Windows only) for non-standard listener ports
 - **Token correlation** for confirmed callback verification (scan mode)
-- **Rich terminal output** with tables, colors, and progress indicators
+- **Rich live display** with per-target progress bars, real-time findings table, and phase indicators (probe/scan/drain)
 
 ## Installation
 
 ```bash
-uv pip install -e .
+uv sync
 ```
 
 ## Quick Start
@@ -182,17 +184,34 @@ coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass \
 
 ## Output
 
+Scan mode shows a Rich live display with three phases:
+
+1. **Probe phase** -- pre-flight endpoint probing with a spinner, testing
+   connectivity to unique RPC bindings before attempting triggers
+2. **Scan phase** -- per-target progress bars with inline counters
+   (`completed/total`), and a findings table showing VULNERABLE, ACCESSIBLE,
+   and SENT results as they arrive
+3. **Drain phase** -- waits for late callbacks to confirm results; enriches
+   VULNERABLE results with captured Net-NTLMv2 hashes
+
+The live display is the primary interactive output. Interesting results
+(VULNERABLE, ACCESSIBLE, SENT) are shown in the findings table. Captured
+NTLMv2 hashes are printed inline with the result.
+
 ```bash
-# Table output (default) -- shows only vulnerable/accessible/sent
+# Default scan (live display with findings table + progress bars)
 coercex scan -t dc01 -u user -p pass
 
-# Show all results
+# Verbose: show INFO-level log messages above the live display
 coercex scan -t dc01 -u user -p pass -v
 
-# JSON output
+# Debug: show DEBUG-level log messages (very noisy)
+coercex scan -t dc01 -u user -p pass --debug
+
+# JSON output (machine-readable, no live display)
 coercex scan -t dc01 -u user -p pass --json
 
-# Write to file
+# Write results to file (in addition to live display)
 coercex scan -t dc01 -u user -p pass -o results.txt
 coercex scan -t dc01 -u user -p pass --json -o results.json
 ```
@@ -202,6 +221,7 @@ coercex scan -t dc01 -u user -p pass --json -o results.json
 ```mermaid
 graph TD
     CLI["CLI<br/><i>Typer + Rich</i>"]
+    Display["ScanDisplay<br/><i>Rich Live TUI</i>"]
     Scanner["Scanner<br/><i>async orchestrator</i>"]
     Pool["DCERPCPool<br/><i>connection pool</i>"]
     Listener["Listener<br/><i>HTTP + SMB</i>"]
@@ -209,6 +229,8 @@ graph TD
     Targets["Target hosts"]
 
     CLI --> Scanner
+    CLI --> Display
+    Scanner --> Display
     Scanner --> Pool
     Scanner --> Listener
     Pool --> Methods
@@ -216,7 +238,9 @@ graph TD
     Methods --> Targets
 ```
 
-- **Scanner**: Async orchestrator with semaphore-bounded concurrency, 2 modes (scan/coerce)
-- **DCERPCPool**: Connection pool keyed by (target, pipe, UUID), all impacket calls wrapped with `asyncio.to_thread()`
-- **Listener**: Async HTTP + SMB listener with UUID token correlation (scan mode)
-- **Methods**: Registry of 19 coercion methods across 7 protocols with pipe binding metadata, glob/regex filtering
+- **CLI** (`cli/`): Typer commands, Rich console, logging setup, display lifecycle
+- **ScanDisplay** (`cli/display.py`): Rich Live widget with per-target progress bars, findings table, and phase transitions (probe/scan/drain/done)
+- **Scanner** (`scanner.py`): Async orchestrator with semaphore-bounded concurrency, pre-flight probing, callback correlation (token + IP-based fallback with transport check), drain enrichment
+- **DCERPCPool** (`connection.py`): Connection pool keyed by (target, pipe, UUID), all impacket calls wrapped with `asyncio.to_thread()`, double-lock pattern
+- **Listener** (`listener/`): Async HTTP + SMB listener with token-based callback correlation, Net-NTLMv2 hash capture, NTLM challenge/response parsing
+- **Methods** (`methods/`): Registry of 19 coercion methods across 7 protocols with pipe binding metadata, glob/regex filtering
