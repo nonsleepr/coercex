@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from typing import Annotated
 
 import typer
@@ -138,18 +137,26 @@ def _build_creds(
 
 
 def _setup_logging(*, verbose: bool = False, debug: bool = False) -> None:
+    from rich.logging import RichHandler
+
     if debug:
         level = logging.DEBUG
     elif verbose:
         level = logging.INFO
     else:
         level = logging.WARNING
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stderr,
+
+    # Use RichHandler backed by the stderr console so log lines render
+    # above the Rich Live display instead of interleaving with it.
+    handler = RichHandler(
+        console=console,
+        show_time=verbose or debug,
+        show_path=False,
+        rich_tracebacks=debug,
+        markup=False,
+        keywords=[],
     )
+    logging.basicConfig(level=level, handlers=[handler])
     if not debug:
         logging.getLogger("impacket").setLevel(logging.WARNING)
 
