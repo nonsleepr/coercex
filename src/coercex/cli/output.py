@@ -103,32 +103,17 @@ def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
     return json.dumps(data, indent=2)
 
 
-def _print_summary(stats: ScanStats) -> None:
-    """Print a Rich summary panel."""
-    from rich.panel import Panel
-
-    lines = [
-        f"[bold]Targets:[/]        {stats.total_targets}",
-        f"[bold]Attempts:[/]       {stats.total_attempts}",
-        f"[bold green]Vulnerable:[/]    {stats.vulnerable}",
-        f"[cyan]Sent:[/]          {stats.sent}",
-        f"[yellow]Accessible:[/]    {stats.accessible}",
-        f"[red]Access Denied:[/] {stats.access_denied}",
-        f"[dim]Not Available:[/] {stats.not_available}",
-        f"[bold red]Connect Errors:[/]{stats.connect_errors}",
-        f"[magenta]Timeouts:[/]      {stats.timeouts}",
-        f"[dim red]Unknown Errors:[/] {stats.unknown_errors}",
-    ]
-    console.print(Panel("\n".join(lines), title="Summary", border_style="cyan"))
-
-
 def output_results(
     stats: ScanStats,
     json_output: bool,
     verbose: bool,
     output_file: str,
 ) -> None:
-    """Render results to stdout/file."""
+    """Render results to stdout/file.
+
+    When no ``--json`` or ``--output`` is given the live display already
+    shows findings and per-target counters, so nothing extra is printed.
+    """
     if json_output:
         output = format_results_json(stats, show_all=verbose)
         if output_file:
@@ -137,17 +122,9 @@ def output_results(
             console.print(f"Results written to [bold]{output_file}[/]")
         else:
             out_console.print(output)
-    else:
+    elif output_file:
         table = format_results_table_rich(stats, show_all=verbose)
-        if output_file:
-            file_console = Console(file=open(output_file, "w"), width=200)
-            file_console.print(table)
-            file_console.file.close()
-            console.print(f"Results written to [bold]{output_file}[/]")
-        else:
-            if table.row_count == 0:
-                out_console.print("[dim]No vulnerable methods found.[/]")
-            else:
-                out_console.print(table)
-
-    _print_summary(stats)
+        file_console = Console(file=open(output_file, "w"), width=200)
+        file_console.print(table)
+        file_console.file.close()
+        console.print(f"Results written to [bold]{output_file}[/]")
