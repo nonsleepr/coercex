@@ -36,7 +36,7 @@ Comprehensive comparison between coercex (this project) and the original Coercer
 | **Port Redirect** | Yes (Windows-only, pydivert) | No |
 | **Open Pipe Discovery** | No | Yes (scan/fuzz auth mode) |
 | **Random Path Generation** | All methods (built-in) | All methods |
-| **Stop on Success** | `--stop-on-vulnerable` | `--stop-on-ntlm-auth` |
+| **Stop on Success** | `--stop-on-coerced` | `--stop-on-ntlm-auth` |
 | **Package Manager** | uv | pip / poetry |
 | **Type Hints** | Full (mypy checked) | Minimal |
 | **Code Quality** | Ruff + mypy CI | Manual |
@@ -74,11 +74,11 @@ MS-EVEN  (1 method)   - CheeseOunce
 ### 2. Operation Modes
 
 #### coercex (2 modes)
-1. **scan** - Detect vulnerable methods with local listener (callback confirmation)
+1. **scan** - Detect coercible methods with local listener (callback confirmation)
 2. **coerce** - Fire-and-forget triggers to external relay (ntlmrelayx, etc.)
 
 #### Coercer (3 modes)
-1. **scan** - Detect vulnerable methods with local listener
+1. **scan** - Detect coercible methods with local listener
 2. **coerce** - Trigger coercion to external relay
 3. **fuzz** - Research mode to fuzz RPCs with various path combinations
 
@@ -120,8 +120,8 @@ MS-EVEN  (1 method)   - CheeseOunce
 3. **Timestamp + IP fallback** (last resort) - With transport check to prevent cross-transport false positives
 
 **Drain phase enrichment:**
-- Upgrades `VULNERABLE` results missing auth credentials with captured Net-NTLMv2 hashes
-- Only enriches confirmed VULNERABLE results (no ACCESSIBLE/UNKNOWN_ERROR sweeps)
+- Upgrades `COERCED` results missing auth credentials with captured Net-NTLMv2 hashes
+- Only enriches confirmed COERCED results (no ACCESSIBLE/UNKNOWN_ERROR sweeps)
 
 #### Coercer
 - **IP + timestamp correlation** (basic)
@@ -139,7 +139,7 @@ MS-EVEN  (1 method)   - CheeseOunce
   - **Probe phase** - Spinner showing endpoint connectivity tests
   - **Scan phase** - Per-target progress bars with inline counters (`completed/total`)
   - **Drain phase** - Waits for late callbacks, enriches results with captured hashes
-  - **Findings table** - Real-time display of VULNERABLE/ACCESSIBLE/SENT results
+  - **Findings table** - Real-time display of COERCED/ACCESSIBLE/SENT results
 - **Minimal noise** - Only shows interesting results by default
 - **Inline hash display** - Net-NTLMv2 hashes printed with result line
 - **Export formats:** JSON, text file (via `-o/--output`)
@@ -168,7 +168,7 @@ MS-EVEN  (1 method)   - CheeseOunce
   - Regex: `--methods 'EfsRpc.*Raw'`
   - Exact: `--methods 'EfsRpcOpenFileRaw'`
 - **Transport filtering** (`--transport smb` or `--transport http`)
-- **Stop on first vulnerable** (`--stop-on-vulnerable`) - priority-ordered fast scan
+- **Stop on first coerced** (`--stop-on-coerced`) - priority-ordered fast scan
 
 #### Coercer-specific:
 - Filter by pipe name (`--filter-pipe-name`)
@@ -228,7 +228,7 @@ MS-EVEN  (1 method)   - CheeseOunce
 
 **OPSEC-conscious scan:**
 ```bash
-coercex scan TARGET -u USER -p PASS --stop-on-vulnerable \
+coercex scan TARGET -u USER -p PASS --stop-on-coerced \
   -c 1 --transport http --delay 2
 ```
 - `-c 1` = no temporal correlation (one at a time)

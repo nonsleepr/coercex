@@ -1,7 +1,7 @@
 """Command-line interface for coercex.
 
 Modern Typer-based CLI with Rich output.  Two subcommands:
-  scan   - detect vulnerable methods (all path styles, optional listener)
+  scan   - detect coercible methods (all path styles, optional listener)
   coerce - trigger coercion with listener (specific or all methods)
 """
 
@@ -44,7 +44,7 @@ from coercex.cli.options import (
     ProtocolsOpt,
     RedirectOpt,
     SmbPortOpt,
-    StopOnVulnerableOpt,
+    StopOnCoercedOpt,
     TargetOpt,
     TargetsFileOpt,
     TimeoutOpt,
@@ -192,7 +192,7 @@ def scan(
     transport: TransportOpt = None,
     callback_timeout: CallbackTimeoutOpt = 5.0,
     redirect: RedirectOpt = False,
-    stop_on_vulnerable: StopOnVulnerableOpt = False,
+    stop_on_coerced: StopOnCoercedOpt = False,
     delay: DelayOpt = 0.0,
     discover_pipes: DiscoverPipesOpt = False,
     username: UsernameOpt = "",
@@ -213,10 +213,10 @@ def scan(
     output_file: OutputFileOpt = None,
     debug: DebugOpt = False,
 ) -> None:
-    """Detect vulnerable coercion methods by trying all path styles.
+    """Detect coercible methods by trying all path styles.
 
     Tries every method/pipe/transport/path-style combination to find
-    which RPC methods are vulnerable on each target.
+    which RPC methods are coercible on each target.
 
     Starts HTTP + SMB listeners to confirm actual callbacks.
     If -l is not given, the listener IP is auto-detected from the
@@ -245,7 +245,7 @@ def scan(
         smb_port=smb_port,
         callback_timeout=callback_timeout,
         redirect=redirect,
-        stop_on_vulnerable=stop_on_vulnerable,
+        stop_on_coerced=stop_on_coerced,
         delay=delay,
         discover_pipes=discover_pipes,
         concurrency=concurrency,

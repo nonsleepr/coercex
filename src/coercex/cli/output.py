@@ -35,7 +35,7 @@ def format_results_table_rich(stats: ScanStats, show_all: bool = False) -> Table
             r
             for r in results
             if r.result
-            in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE, TriggerResult.SENT)
+            in (TriggerResult.COERCED, TriggerResult.ACCESSIBLE, TriggerResult.SENT)
         ]
 
     for r in results:
@@ -66,14 +66,14 @@ def format_results_json(stats: ScanStats, show_all: bool = False) -> str:
             r
             for r in results
             if r.result
-            in (TriggerResult.VULNERABLE, TriggerResult.ACCESSIBLE, TriggerResult.SENT)
+            in (TriggerResult.COERCED, TriggerResult.ACCESSIBLE, TriggerResult.SENT)
         ]
 
     data = {
         "summary": {
             "total_targets": stats.total_targets,
             "total_attempts": stats.total_attempts,
-            "vulnerable": stats.vulnerable,
+            "coerced": stats.coerced,
             "sent": stats.sent,
             "accessible": stats.accessible,
             "access_denied": stats.access_denied,

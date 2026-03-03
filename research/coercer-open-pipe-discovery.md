@@ -205,7 +205,7 @@ def is_anonymous(self):
 
 #### Fuzz Mode (`coercer/core/modes/fuzz.py`)
 
-**Purpose:** Discover new vulnerable pipes/methods by testing arbitrary combinations
+**Purpose:** Discover new coercible pipes/methods by testing arbitrary combinations
 
 ```python
 def fuzz(...):
@@ -243,7 +243,7 @@ if transportType == TransportType.NCAN_NP:
 
 - **Does NOT use pipe discovery**
 - Uses predefined pipes from method definitions (e.g., MS-EFSR uses `\PIPE\efsrpc`)
-- Directly tests known vulnerable method/pipe combinations
+- Directly tests known coercible method/pipe combinations
 
 #### Coerce Mode (`coercer/core/modes/coerce.py`)
 
@@ -341,7 +341,7 @@ for method in methods_for_this_interface:
 | **Authenticated Mode** | Full SMB enumeration of IPC$ share | N/A - always uses predefined methods |
 | **Unauthenticated Mode** | Hardcoded list of 18 common pipes | N/A |
 | **Impacket API** | `smbClient.listPath()` | `dce.bind()` |
-| **Purpose** | Discover new vulnerable pipes/methods | Optimize known method testing |
+| **Purpose** | Discover new coercible pipes/methods | Optimize known method testing |
 | **Coverage** | All pipes (if authenticated) | Unique (pipe, UUID) bindings only |
 | **Efficiency** | Tests all pipes × all methods | Tests only reachable endpoints (~40-50% reduction) |
 | **Research Value** | High (finds unknowns) | Low (validates knowns) |
@@ -405,7 +405,7 @@ for method in methods_for_this_interface:
 - Trade-off: Slower, but finds unknowns
 
 **coercex (production-oriented):**
-- Goal: **Efficiently test known vulnerabilities**
+- Goal: **Efficiently test known coercible methods**
 - Strategy: Optimized testing (pre-flight probing + connection pooling)
 - Use case: Pentesting, red teaming, production scans
 - Trade-off: Faster, but only validates knowns
@@ -463,7 +463,7 @@ async def _preflight_probe(self, targets: list[str], methods: list[CoercionMetho
 - ✅ **Documenting all accessible pipes** (reporting)
 
 ### Use coercex's Pre-flight Probing When:
-- ✅ **Testing known vulnerable methods** (pentesting)
+- ✅ **Testing known coercible methods** (pentesting)
 - ✅ **High-speed scanning** (production environments)
 - ✅ **Multi-target concurrent scans** (100+ targets)
 - ✅ **Optimizing connection reuse** (efficiency)

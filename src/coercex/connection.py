@@ -185,7 +185,7 @@ class DCERPCPool:
 
             # If we get here without exception, the call succeeded --
             # the method processed our path.  Mark as ACCESSIBLE; only
-            # the scanner upgrades to VULNERABLE on confirmed callback.
+            # the scanner upgrades to COERCED on confirmed callback.
             return ScanResult(
                 target=target,
                 protocol=method.protocol_short,

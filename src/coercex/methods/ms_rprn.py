@@ -96,7 +96,7 @@ def get_methods() -> list[CoercionMethod]:
             path_styles=list(RPRN_PATH_STYLES),
             trigger_fn=_trigger_change_notification_ex,
             needs_target_handle=True,
-            priority=2,  # PrinterBug - widely vulnerable
+            priority=2,  # PrinterBug - widely coercible
         ),
         CoercionMethod(
             protocol_short=PROTOCOL_SHORT,

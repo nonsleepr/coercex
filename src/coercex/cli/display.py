@@ -38,7 +38,7 @@ class _TargetProgress:
 
     total: int = 0
     completed: int = 0
-    vulnerable: int = 0
+    coerced: int = 0
     accessible: int = 0
     sent: int = 0
     access_denied: int = 0
@@ -64,7 +64,7 @@ class ScanDisplay:
     # Results shown in the live findings table.
     _INTERESTING = frozenset(
         {
-            TriggerResult.VULNERABLE,
+            TriggerResult.COERCED,
             TriggerResult.ACCESSIBLE,
             TriggerResult.SENT,
         }
@@ -246,7 +246,7 @@ class ScanDisplay:
         self._refresh()
 
     def mark_target_done(self, target: str, reason: str = "done") -> None:
-        """Mark a target as complete (e.g. vulnerable found)."""
+        """Mark a target as complete (e.g. coerced found)."""
         tp = self._target_progress.get(target)
         if tp and target in self._scan_task_ids:
             self._scan_progress.update(
@@ -275,12 +275,12 @@ class ScanDisplay:
         if result.result in self._INTERESTING:
             self._interesting_results.append(result)
 
-        # Immediate notification for VULNERABLE results above the live display
-        if result.result == TriggerResult.VULNERABLE:
+        # Immediate notification for COERCED results above the live display
+        if result.result == TriggerResult.COERCED:
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
             tr = f" [dim]({result.transport})[/]" if result.transport else ""
             self._console.print(
-                f"  [bold green][+] VULNERABLE[/] {result.target} "
+                f"  [bold green][+] COERCED[/] {result.target} "
                 f"[blue]{result.protocol}[/]::{result.method}"
                 f"{tr}{auth}"
             )
@@ -303,7 +303,7 @@ class ScanDisplay:
         """Notify that a previously-reported result was upgraded.
 
         Called by the drain phase when ACCESSIBLE/UNKNOWN_ERROR results
-        are upgraded to VULNERABLE after a late callback arrives.
+        are upgraded to COERCED after a late callback arrives.
         Does NOT increment the completed counter.
         """
         target = result.target
@@ -321,15 +321,15 @@ class ScanDisplay:
         # Add to interesting list if it wasn't there before
         if old_status not in self._INTERESTING and result.result in self._INTERESTING:
             self._interesting_results.append(result)
-        # If it was already interesting (e.g. ACCESSIBLE→VULNERABLE), the
+        # If it was already interesting (e.g. ACCESSIBLE→COERCED), the
         # table rebuilds from the mutable ScanResult objects, so no action needed.
 
         # Notifications
-        if result.result == TriggerResult.VULNERABLE:
+        if result.result == TriggerResult.COERCED:
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
             tr = f" [dim]({result.transport})[/]" if result.transport else ""
             self._console.print(
-                f"  [bold green][+] UPGRADED → VULNERABLE[/] {result.target} "
+                f"  [bold green][+] UPGRADED → COERCED[/] {result.target} "
                 f"[blue]{result.protocol}[/]::{result.method}"
                 f"{tr}{auth}"
             )
@@ -347,8 +347,8 @@ class ScanDisplay:
     @staticmethod
     def _increment_counter(tp: _TargetProgress, status: TriggerResult) -> None:
         match status:
-            case TriggerResult.VULNERABLE:
-                tp.vulnerable += 1
+            case TriggerResult.COERCED:
+                tp.coerced += 1
             case TriggerResult.ACCESSIBLE:
                 tp.accessible += 1
             case TriggerResult.SENT:
@@ -367,8 +367,8 @@ class ScanDisplay:
     @staticmethod
     def _decrement_counter(tp: _TargetProgress, status: TriggerResult) -> None:
         match status:
-            case TriggerResult.VULNERABLE:
-                tp.vulnerable -= 1
+            case TriggerResult.COERCED:
+                tp.coerced -= 1
             case TriggerResult.ACCESSIBLE:
                 tp.accessible -= 1
             case TriggerResult.SENT:
@@ -389,8 +389,8 @@ class ScanDisplay:
     def _format_counters(self, tp: _TargetProgress) -> str:
         """Format inline status counters for a target's progress bar."""
         parts: list[str] = []
-        if tp.vulnerable:
-            parts.append(f"[bold green]{tp.vulnerable} vuln[/]")
+        if tp.coerced:
+            parts.append(f"[bold green]{tp.coerced} coerced[/]")
         if tp.accessible:
             parts.append(f"[yellow]{tp.accessible} acc[/]")
         if tp.sent:

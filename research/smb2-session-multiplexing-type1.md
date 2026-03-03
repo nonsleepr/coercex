@@ -193,7 +193,7 @@ correlation. This is the right call because:
 | Is the current debug-level log correct? | Yes. The message accurately describes the situation and the severity is appropriate. |
 | Are callbacks lost? | No. Other connections from the same target complete successfully, and IP-based fallback catches the partials. |
 | When is this most likely? | High concurrency (`-c N` with N > 1) scanning multiple methods against the same target. |
-| How to avoid it entirely? | Use `--stop-on-vulnerable` (method-sequential) or `-c 1` (one-at-a-time). |
+| How to avoid it entirely? | Use `--stop-on-coerced` (method-sequential) or `-c 1` (one-at-a-time). |
 
 ## References
 

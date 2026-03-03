@@ -1,21 +1,21 @@
 # coercex -- Agent Guidelines
 
 Async NTLM authentication coercion scanner replacing Coercer.  Two modes:
-**scan** (detect vulnerable methods, runs local listener) and **coerce**
+**scan** (detect coercible methods, runs local listener) and **coerce**
 (fire-and-forget triggers aimed at an external relay).
 
 ## Scanning Modes & Optimization
 
-coercex supports two scanning strategies controlled by `--stop-on-vulnerable`:
+coercex supports two scanning strategies controlled by `--stop-on-coerced`:
 
-### Fast Scan (--stop-on-vulnerable)
+### Fast Scan (--stop-on-coerced)
 
 **Goal:** Find one working coercion method ASAP for immediate exploitation.
 
 **Behavior:**
 - **Method-sequential, target-parallel execution** — one method at a time
   across all targets, guarantees priority order
-- **Priority-based ordering** — tries most-likely-vulnerable methods first:
+- **Priority-based ordering** — tries most-likely-coercible methods first:
   1. MS-EFSR (PetitPotam) - priority 1
   2. MS-RPRN (PrinterBug) - priority 2
   3. MS-DFSNM (DFSCoerce) - priority 3
@@ -29,11 +29,11 @@ coercex supports two scanning strategies controlled by `--stop-on-vulnerable`:
   bindings before attempting triggers, eliminates ~40-50% of futile attempts
 - **Connection pool warming** — pre-flight probe sessions are cached and
   reused by subsequent trigger calls
-- **Stops when first VULNERABLE result found** — removes target from scan set
+- **Stops when first COERCED result found** — removes target from scan set
 
 **OPSEC-conscious variant:**
 ```bash
-uv run coercex scan TARGET -u USER -p PASS --stop-on-vulnerable \
+uv run coercex scan TARGET -u USER -p PASS --stop-on-coerced \
   -c 1 --transport http --delay 2
 ```
 - `-c 1` = no temporal correlation (one attempt at a time)
@@ -47,7 +47,7 @@ uv run coercex scan TARGET -u USER -p PASS --stop-on-vulnerable \
 **Behavior:**
 - **All combinations upfront** — methods × targets × bindings × path_styles
 - **Fully parallel execution** — bounded only by `-c/--concurrency` semaphore
-- **Tests all path_styles** — identifies every vulnerable method/path combo
+- **Tests all path_styles** — identifies every coercible method/path combo
 - **Priority-sorted output** — results displayed in priority order for clarity
 - **Pre-flight probing still runs** — eliminates unreachable endpoints upfront
 
@@ -102,7 +102,7 @@ uv run pytest -xvs
 uv run pytest tests/test_display.py -v
 
 # Run a single test
-uv run pytest tests/test_scanner_attempt.py::test_drain_enriches_vulnerable_missing_auth -v
+uv run pytest tests/test_scanner_attempt.py::test_drain_enriches_coerced_missing_auth -v
 
 # Run tests matching a keyword
 uv run pytest -k "drain" -v
@@ -265,7 +265,7 @@ redirector transparently forwards inbound traffic from 445 to 4445.
 - **Callback correlation** -- Three layers: (1) token-based via UNC path
   (primary), (2) IP-based FIFO for HTTP handler, (3) timestamp + IP
   fallback in `_attempt()` with transport check to prevent cross-transport
-  false positives.  Drain enrichment only upgrades VULNERABLE results
+  false positives.  Drain enrichment only upgrades COERCED results
   missing credentials -- no ACCESSIBLE/UNKNOWN_ERROR sweeps.
 - **`--transport` accepts multiple values** -- scan/coerce can try both SMB
   and HTTP simultaneously.

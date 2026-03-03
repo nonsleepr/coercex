@@ -21,8 +21,8 @@ class Transport(Enum):
 class TriggerResult(Enum):
     """Result of a coercion trigger attempt."""
 
-    VULNERABLE = (
-        "vulnerable"  # Method triggered, callback received or error indicates it worked
+    COERCED = (
+        "coerced"  # Method triggered, callback received or error indicates it worked
     )
     ACCESSIBLE = "accessible"  # Method accessible but couldn't confirm coercion
     ACCESS_DENIED = "access_denied"  # Can't bind / access denied
@@ -127,7 +127,7 @@ class ScanStats:
 
     total_targets: int = 0
     total_attempts: int = 0
-    vulnerable: int = 0
+    coerced: int = 0
     accessible: int = 0
     access_denied: int = 0
     not_available: int = 0
@@ -141,8 +141,8 @@ class ScanStats:
         self.results.append(result)
         self.total_attempts += 1
         match result.result:
-            case TriggerResult.VULNERABLE:
-                self.vulnerable += 1
+            case TriggerResult.COERCED:
+                self.coerced += 1
             case TriggerResult.ACCESSIBLE:
                 self.accessible += 1
             case TriggerResult.ACCESS_DENIED:
@@ -187,7 +187,7 @@ class ScanConfig:
     callback_timeout: float = 5.0
     redirect: bool = False
     verbose: bool = False
-    stop_on_vulnerable: bool = False
+    stop_on_coerced: bool = False
     delay: float = 0.0  # Seconds to wait between attempts per target (OPSEC)
     discover_pipes: bool = False  # Enumerate IPC$ pipes before pre-flight probe
 
@@ -200,7 +200,7 @@ class ScanConfig:
 # Rich status styling for TriggerResult display.
 # Shared by cli and scanner modules.
 STATUS_STYLE: dict[TriggerResult, tuple[str, str]] = {
-    TriggerResult.VULNERABLE: ("bold green", "[+]"),
+    TriggerResult.COERCED: ("bold green", "[+]"),
     TriggerResult.ACCESSIBLE: ("yellow", "[~]"),
     TriggerResult.ACCESS_DENIED: ("red", "[-]"),
     TriggerResult.NOT_AVAILABLE: ("dim", "[ ]"),

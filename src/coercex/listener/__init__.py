@@ -852,7 +852,7 @@ class AsyncListener:
         When token extraction from raw SMB data fails, we match the callback
         source IP against pending tokens registered for that target.  The
         oldest (first-created) pending token is resolved -- this gives
-        target-level VULNERABLE confirmation with a best-guess at which
+        target-level COERCED confirmation with a best-guess at which
         trigger actually caused the callback.
         """
         self._callbacks.append(callback)

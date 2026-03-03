@@ -114,8 +114,8 @@ class TestAttemptCallbackWait:
     """_attempt waits for callbacks on ACCESSIBLE and UNKNOWN_ERROR results."""
 
     @pytest.mark.asyncio
-    async def test_accessible_with_token_callback_becomes_vulnerable(self) -> None:
-        """ACCESSIBLE + token-based callback → VULNERABLE."""
+    async def test_accessible_with_token_callback_becomes_coerced(self) -> None:
+        """ACCESSIBLE + token-based callback → COERCED."""
         config = _make_config()
         scanner = Scanner(config)
 
@@ -164,17 +164,17 @@ class TestAttemptCallbackWait:
             path_style_override="share_file",
         )
 
-        # Verify result was upgraded to VULNERABLE
+        # Verify result was upgraded to COERCED
         assert len(scanner.stats.results) == 1
         result = scanner.stats.results[0]
-        assert result.result == TriggerResult.VULNERABLE
+        assert result.result == TriggerResult.COERCED
         assert result.callback_received is True
         assert result.auth_user == "CORP\\DC01$"
         assert result.ntlmv2_hash == "DC01$::CORP:hash1"
 
     @pytest.mark.asyncio
-    async def test_unknown_error_with_callback_becomes_vulnerable(self) -> None:
-        """UNKNOWN_ERROR + callback → VULNERABLE (new behavior)."""
+    async def test_unknown_error_with_callback_becomes_coerced(self) -> None:
+        """UNKNOWN_ERROR + callback → COERCED (new behavior)."""
         config = _make_config()
         scanner = Scanner(config)
 
@@ -223,7 +223,7 @@ class TestAttemptCallbackWait:
 
         assert len(scanner.stats.results) == 1
         result = scanner.stats.results[0]
-        assert result.result == TriggerResult.VULNERABLE
+        assert result.result == TriggerResult.COERCED
         assert result.callback_received is True
 
     @pytest.mark.asyncio
@@ -320,8 +320,8 @@ class TestAttemptTimestampFallback:
     scoped) not scan_start, so it is tightly bounded."""
 
     @pytest.mark.asyncio
-    async def test_timestamp_fallback_upgrades_to_vulnerable(self) -> None:
-        """ACCESSIBLE + timeout + has_connection + get_callback_since → VULNERABLE.
+    async def test_timestamp_fallback_upgrades_to_coerced(self) -> None:
+        """ACCESSIBLE + timeout + has_connection + get_callback_since → COERCED.
 
         When the target connects back but the token can't be extracted from
         TREE_CONNECT, the per-attempt timestamp fallback upgrades the result.
@@ -377,7 +377,7 @@ class TestAttemptTimestampFallback:
 
         assert len(scanner.stats.results) == 1
         result = scanner.stats.results[0]
-        assert result.result == TriggerResult.VULNERABLE
+        assert result.result == TriggerResult.COERCED
         assert result.callback_received is True
         assert result.auth_user == "CORP\\DC01$"
 
@@ -449,9 +449,9 @@ class TestAttemptTimestampFallback:
 
 
 class TestDrainCallbacks:
-    """_drain_callbacks only enriches VULNERABLE results missing auth_user.
+    """_drain_callbacks only enriches COERCED results missing auth_user.
 
-    It no longer upgrades ACCESSIBLE/UNKNOWN_ERROR → VULNERABLE because
+    It no longer upgrades ACCESSIBLE/UNKNOWN_ERROR → COERCED because
     timestamp-based correlation cannot distinguish which concurrent trigger
     caused a callback (cross-transport/cross-method false positives).
     """
@@ -489,7 +489,7 @@ class TestDrainCallbacks:
         # No upgrade — result stays ACCESSIBLE
         assert result.result == TriggerResult.ACCESSIBLE
         assert result.callback_received is False
-        assert scanner.stats.vulnerable == 0
+        assert scanner.stats.coerced == 0
         assert scanner.stats.accessible == 1
 
     @pytest.mark.asyncio
@@ -524,12 +524,12 @@ class TestDrainCallbacks:
         # No upgrade — result stays UNKNOWN_ERROR
         assert result.result == TriggerResult.UNKNOWN_ERROR
         assert result.callback_received is False
-        assert scanner.stats.vulnerable == 0
+        assert scanner.stats.coerced == 0
         assert scanner.stats.unknown_errors == 1
 
     @pytest.mark.asyncio
     async def test_drain_skips_when_no_drainable_results(self) -> None:
-        """_drain_callbacks returns early if no VULNERABLE results missing auth_user."""
+        """_drain_callbacks returns early if no COERCED results missing auth_user."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -555,8 +555,8 @@ class TestDrainCallbacks:
         assert result.result == TriggerResult.ACCESS_DENIED
 
     @pytest.mark.asyncio
-    async def test_drain_enriches_vulnerable_missing_auth(self) -> None:
-        """VULNERABLE result missing auth_user gets enriched from late callback."""
+    async def test_drain_enriches_coerced_missing_auth(self) -> None:
+        """COERCED result missing auth_user gets enriched from late callback."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -566,7 +566,7 @@ class TestDrainCallbacks:
 
         scan_start = time.monotonic()
 
-        # Manually add a VULNERABLE result with no auth_user (e.g. from
+        # Manually add a COERCED result with no auth_user (e.g. from
         # the timestamp fallback path where the callback arrived but the
         # NTLM handshake wasn't complete yet)
         result = ScanResult(
@@ -575,7 +575,7 @@ class TestDrainCallbacks:
             method="RpcRemoteFindFirstPrinterChangeNotificationEx",
             pipe=r"\PIPE\spoolss",
             uuid="12345678-1234-abcd-ef00-0123456789ab",
-            result=TriggerResult.VULNERABLE,
+            result=TriggerResult.COERCED,
             transport="smb",
             callback_received=True,
             source_ip=TARGET_IP,
@@ -596,13 +596,13 @@ class TestDrainCallbacks:
         await scanner._drain_callbacks(scan_start)
 
         # Result should now have credentials
-        assert result.result == TriggerResult.VULNERABLE
+        assert result.result == TriggerResult.COERCED
         assert result.auth_user == "INLANEFREIGHT\\DC01$"
         assert result.ntlmv2_hash == "DC01$::INLANEFREIGHT:aabbccdd:112233:4455"
 
     @pytest.mark.asyncio
-    async def test_drain_enriches_vulnerable_only_hash(self) -> None:
-        """VULNERABLE result with auth_user but missing hash gets hash enriched."""
+    async def test_drain_enriches_coerced_only_hash(self) -> None:
+        """COERCED result with auth_user but missing hash gets hash enriched."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -619,7 +619,7 @@ class TestDrainCallbacks:
             method="RpcRemoteFindFirstPrinterChangeNotificationEx",
             pipe=r"\PIPE\spoolss",
             uuid="12345678-1234-abcd-ef00-0123456789ab",
-            result=TriggerResult.VULNERABLE,
+            result=TriggerResult.COERCED,
             transport="smb",
             callback_received=True,
             source_ip=TARGET_IP,
@@ -645,8 +645,8 @@ class TestDrainCallbacks:
         assert result.ntlmv2_hash == "DC01$::INLANEFREIGHT:aabbccdd:112233:4455"
 
     @pytest.mark.asyncio
-    async def test_drain_skips_fully_enriched_vulnerable(self) -> None:
-        """VULNERABLE result with both auth_user and hash already set → drain skips."""
+    async def test_drain_skips_fully_enriched_coerced(self) -> None:
+        """COERCED result with both auth_user and hash already set → drain skips."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -663,7 +663,7 @@ class TestDrainCallbacks:
             method="RpcRemoteFindFirstPrinterChangeNotificationEx",
             pipe=r"\PIPE\spoolss",
             uuid="12345678-1234-abcd-ef00-0123456789ab",
-            result=TriggerResult.VULNERABLE,
+            result=TriggerResult.COERCED,
             transport="smb",
             callback_received=True,
             source_ip=TARGET_IP,
@@ -689,8 +689,8 @@ class TestDrainCallbacks:
         assert result.ntlmv2_hash == "DC01$::INLANEFREIGHT:existing_hash"
 
     @pytest.mark.asyncio
-    async def test_drain_no_callback_for_vulnerable(self) -> None:
-        """VULNERABLE with no auth_user but no callback data → stays unenriched."""
+    async def test_drain_no_callback_for_coerced(self) -> None:
+        """COERCED with no auth_user but no callback data → stays unenriched."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -706,7 +706,7 @@ class TestDrainCallbacks:
             method="RpcRemoteFindFirstPrinterChangeNotificationEx",
             pipe=r"\PIPE\spoolss",
             uuid="12345678-1234-abcd-ef00-0123456789ab",
-            result=TriggerResult.VULNERABLE,
+            result=TriggerResult.COERCED,
             transport="smb",
             callback_received=True,
             source_ip=TARGET_IP,
@@ -722,7 +722,7 @@ class TestDrainCallbacks:
 
     @pytest.mark.asyncio
     async def test_drain_callback_without_credentials(self) -> None:
-        """VULNERABLE with callback that has no credentials → stays unenriched."""
+        """COERCED with callback that has no credentials → stays unenriched."""
         config = _make_config(callback_timeout=0.05)
         scanner = Scanner(config)
 
@@ -738,7 +738,7 @@ class TestDrainCallbacks:
             method="RpcRemoteFindFirstPrinterChangeNotificationEx",
             pipe=r"\PIPE\spoolss",
             uuid="12345678-1234-abcd-ef00-0123456789ab",
-            result=TriggerResult.VULNERABLE,
+            result=TriggerResult.COERCED,
             transport="smb",
             callback_received=True,
             source_ip=TARGET_IP,

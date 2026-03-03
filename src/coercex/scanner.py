@@ -4,7 +4,7 @@ Ties together the DCERPC connection pool, async listener, and method
 registry into a high-performance concurrent pipeline.
 
 Two modes:
-  - scan:   Tries all path styles per method to detect vulnerabilities.
+  - scan:   Tries all path styles per method to detect coercible methods.
             Always starts HTTP + SMB listeners on 0.0.0.0.  If ``-l``
             is not given, the listener IP is auto-detected from the
             default network route.
@@ -74,9 +74,9 @@ class Scanner:
         self._redirector: PortRedirector | None = None
         self._redirect_active: bool = False
         self._semaphore = asyncio.Semaphore(config.concurrency)
-        # Track targets confirmed vulnerable (for --stop-on-vulnerable)
-        self._vulnerable_targets: set[str] = set()
-        self._vulnerable_lock = asyncio.Lock()
+        # Track targets confirmed coerced (for --stop-on-coerced)
+        self._coerced_targets: set[str] = set()
+        self._coerced_lock = asyncio.Lock()
         # Track reachable endpoints (pre-flight probe results)
         self._reachable: dict[str, set[tuple[str, str, str]]] = {}
         # Track discovered pipes per target (pipe discovery results)
@@ -410,7 +410,7 @@ class Scanner:
             )
 
     async def _run_scan(self, methods: list[CoercionMethod]) -> None:
-        """Scan mode: try all path styles per method to detect vulnerabilities."""
+        """Scan mode: try all path styles per method to detect coercible methods."""
         allowed = self.config.transport
         scan_start = time.monotonic()
 
@@ -420,17 +420,17 @@ class Scanner:
         # Pre-flight probe to filter out unreachable endpoints
         await self._probe_endpoints(methods)
 
-        if self.config.stop_on_vulnerable:
+        if self.config.stop_on_coerced:
             # Method-sequential, target-parallel: try one method at a time across
-            # all non-vulnerable targets, stop when all targets are vulnerable
+            # all non-coerced targets, stop when all targets are coerced
             await self._run_scan_sequential(methods, allowed)
         else:
             # Full parallel scan: all methods × targets × bindings × path_styles upfront
             await self._run_scan_parallel(methods, allowed)
 
         # Drain period: keep the listener running while ongoing handshakes
-        # complete, then sweep results to upgrade ACCESSIBLE → VULNERABLE
-        # and enrich VULNERABLE results that are missing auth_user.
+        # complete, then sweep results to upgrade ACCESSIBLE → COERCED
+        # and enrich COERCED results that are missing auth_user.
         await self._drain_callbacks(scan_start)
 
     async def _run_scan_sequential(
@@ -438,7 +438,7 @@ class Scanner:
     ) -> None:
         """Sequential scan: one method at a time, all remaining targets in parallel.
 
-        For --stop-on-vulnerable mode. Guarantees methods are tried in priority order.
+        For --stop-on-coerced mode. Guarantees methods are tried in priority order.
         Only tries the default path_style (first in path_styles list) to minimize noise.
         """
         remaining = set(self.config.targets)
@@ -465,7 +465,7 @@ class Scanner:
 
         for method in methods:
             if not remaining:
-                break  # All targets confirmed vulnerable
+                break  # All targets confirmed coerced
 
             # Filter to reachable bindings only
             reachable_bindings = []
@@ -479,7 +479,7 @@ class Scanner:
             if not reachable_bindings:
                 continue  # No reachable bindings for this method on any remaining target
 
-            # Use only the first path_style (default) for --stop-on-vulnerable
+            # Use only the first path_style (default) for --stop-on-coerced
             if not method.path_styles:
                 continue
             default_transport_name, default_path_style = method.path_styles[0]
@@ -518,16 +518,16 @@ class Scanner:
                 )
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Remove vulnerable targets from remaining set
-                remaining -= self._vulnerable_targets
+                # Remove coerced targets from remaining set
+                remaining -= self._coerced_targets
 
     async def _run_scan_parallel(
         self, methods: list[CoercionMethod], allowed: set[Transport]
     ) -> None:
         """Parallel scan: all methods × targets × bindings × path_styles upfront.
 
-        For full scan mode (no --stop-on-vulnerable). Tries all path_styles to
-        identify every vulnerable method.
+        For full scan mode (no --stop-on-coerced). Tries all path_styles to
+        identify every coercible method.
         """
         all_tasks: list[asyncio.Task[None]] = []
         # Track per-target task counts for the display
@@ -602,7 +602,7 @@ class Scanner:
     # ── DRAIN: wait for late callbacks after all tasks complete ──────
 
     async def _drain_callbacks(self, scan_start: float) -> None:
-        """Wait for late callbacks and enrich VULNERABLE results.
+        """Wait for late callbacks and enrich COERCED results.
 
         After all ``_attempt()`` tasks complete, ongoing SMB handshakes
         may still be running in the listener.  The per-attempt
@@ -611,12 +611,12 @@ class Scanner:
 
         This method:
         1. Sleeps ``callback_timeout`` seconds so handshakes can finish.
-        2. Sweeps VULNERABLE results missing ``auth_user`` or
+        2. Sweeps COERCED results missing ``auth_user`` or
            ``ntlmv2_hash`` and enriches them from the completed
            handshake data.
 
         Note: we intentionally do NOT upgrade ACCESSIBLE/UNKNOWN_ERROR
-        results to VULNERABLE here.  Timestamp-based correlation cannot
+        results to COERCED here.  Timestamp-based correlation cannot
         distinguish which concurrent trigger caused a callback, leading
         to false positives across transports/methods.
         """
@@ -624,12 +624,11 @@ class Scanner:
             return
 
         needs_drain = any(
-            r.result == TriggerResult.VULNERABLE
-            and (not r.auth_user or not r.ntlmv2_hash)
+            r.result == TriggerResult.COERCED and (not r.auth_user or not r.ntlmv2_hash)
             for r in self.stats.results
         )
         if not needs_drain:
-            log.debug("Drain: no VULNERABLE results needing enrichment")
+            log.debug("Drain: no COERCED results needing enrichment")
             return
 
         log.debug(
@@ -646,7 +645,7 @@ class Scanner:
 
         listener = self._listener
         for result in self.stats.results:
-            if result.result != TriggerResult.VULNERABLE:
+            if result.result != TriggerResult.COERCED:
                 continue
             if result.auth_user and result.ntlmv2_hash:
                 continue  # Already fully enriched
@@ -782,12 +781,12 @@ class Scanner:
                 if self.config.delay > 0:
                     await asyncio.sleep(self.config.delay)
 
-                # Early exit if target already confirmed vulnerable
-                if self.config.stop_on_vulnerable:
-                    async with self._vulnerable_lock:
-                        if target in self._vulnerable_targets:
+                # Early exit if target already confirmed coerced
+                if self.config.stop_on_coerced:
+                    async with self._coerced_lock:
+                        if target in self._coerced_targets:
                             log.debug(
-                                "Skipping %s (already confirmed vulnerable via --stop-on-vulnerable)",
+                                "Skipping %s (already confirmed coerced via --stop-on-coerced)",
                                 target,
                             )
                             return
@@ -829,7 +828,7 @@ class Scanner:
                     # or returned an unclassified error (the trigger may have
                     # fired even if the RPC error code is unrecognised).
                     if result.result in (
-                        TriggerResult.VULNERABLE,
+                        TriggerResult.COERCED,
                         TriggerResult.ACCESSIBLE,
                         TriggerResult.UNKNOWN_ERROR,
                     ):
@@ -845,7 +844,7 @@ class Scanner:
                             # Token-based resolution succeeded
                             result.callback_received = True
                             result.source_ip = callback.source_ip
-                            result.result = TriggerResult.VULNERABLE
+                            result.result = TriggerResult.COERCED
                             if callback.ntlmv2_hash:
                                 result.ntlmv2_hash = callback.ntlmv2_hash
                             if callback.username:
@@ -870,7 +869,7 @@ class Scanner:
                                     # Token resolved via TREE_CONNECT after extended wait
                                     result.callback_received = True
                                     result.source_ip = callback.source_ip
-                                    result.result = TriggerResult.VULNERABLE
+                                    result.result = TriggerResult.COERCED
                                     if callback.ntlmv2_hash:
                                         result.ntlmv2_hash = callback.ntlmv2_hash
                                     if callback.username:
@@ -909,7 +908,7 @@ class Scanner:
                                     ):
                                         result.callback_received = True
                                         result.source_ip = cb.source_ip
-                                        result.result = TriggerResult.VULNERABLE
+                                        result.result = TriggerResult.COERCED
                                         if cb.ntlmv2_hash:
                                             result.ntlmv2_hash = cb.ntlmv2_hash
                                         if cb.username:
@@ -957,28 +956,28 @@ class Scanner:
                 result.transport = transport.name.lower()
                 result.path_style = path_style
 
-                # Mark target as vulnerable if confirmed
+                # Mark target as coerced if confirmed
                 if (
-                    result.result == TriggerResult.VULNERABLE
-                    and self.config.stop_on_vulnerable
+                    result.result == TriggerResult.COERCED
+                    and self.config.stop_on_coerced
                 ):
-                    async with self._vulnerable_lock:
-                        self._vulnerable_targets.add(target)
+                    async with self._coerced_lock:
+                        self._coerced_targets.add(target)
                     log.info(
-                        "Target %s confirmed vulnerable (%s::%s) — will skip further methods",
+                        "Target %s confirmed coerced (%s::%s) — will skip further methods",
                         target,
                         method.protocol_short,
                         method.function_name,
                     )
                     if self._display:
-                        self._display.mark_target_done(target, "vulnerable")
+                        self._display.mark_target_done(target, "coerced")
 
                 self.stats.add(result)
                 self._emit(result)
         except asyncio.CancelledError:
-            # Task was cancelled due to --stop-on-vulnerable
+            # Task was cancelled due to --stop-on-coerced
             log.debug(
-                "Cancelled: %s %s::%s (target already vulnerable)",
+                "Cancelled: %s %s::%s (target already coerced)",
                 target,
                 method.protocol_short,
                 method.function_name,
@@ -994,7 +993,7 @@ class Scanner:
         self._emit_line(result)
 
     def _emit_drain_enrichment(self, result: ScanResult) -> None:
-        """Notify that a VULNERABLE result was enriched with credentials during drain."""
+        """Notify that a COERCED result was enriched with credentials during drain."""
         if self._display:
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
             tr = f" [dim]({result.transport})[/]" if result.transport else ""
@@ -1030,7 +1029,7 @@ class Scanner:
     def _emit_line(self, result: ScanResult) -> None:
         """Legacy per-line output (used when no live display is attached)."""
         show = self.config.verbose or result.result in (
-            TriggerResult.VULNERABLE,
+            TriggerResult.COERCED,
             TriggerResult.ACCESSIBLE,
             TriggerResult.SENT,
             TriggerResult.UNKNOWN_ERROR,

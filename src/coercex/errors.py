@@ -6,7 +6,7 @@ from coercex.models import TriggerResult
 
 # Error codes that indicate the method processed our path (target tried
 # to reach the UNC path).  Classified as ACCESSIBLE; only a confirmed
-# callback upgrades to VULNERABLE.
+# callback upgrades to COERCED.
 ACCESSIBLE_ERROR_CODES = {
     0x00000000,  # SUCCESS
     0x00000035,  # ERROR_BAD_NETPATH (tried to reach our UNC path)

@@ -61,7 +61,7 @@ class TestTargetProgress:
         tp = _TargetProgress()
         assert tp.total == 0
         assert tp.completed == 0
-        assert tp.vulnerable == 0
+        assert tp.coerced == 0
         assert tp.accessible == 0
         assert tp.sent == 0
         assert tp.access_denied == 0
@@ -176,7 +176,7 @@ class TestBuildLayout:
     def test_results_table_built_when_interesting(self) -> None:
         d = _make_display()
         d.set_target_total("10.0.0.1", 5)
-        d.add_result(_make_result(result=TriggerResult.VULNERABLE))
+        d.add_result(_make_result(result=TriggerResult.COERCED))
         table = d._build_results_table()
         assert table is not None
         assert table.row_count == 1
@@ -210,9 +210,9 @@ class TestMarkTargetDone:
     def test_marks_target_complete(self) -> None:
         d = _make_display(["10.0.0.1"])
         d.set_target_total("10.0.0.1", 10)
-        d.mark_target_done("10.0.0.1", reason="vulnerable found")
+        d.mark_target_done("10.0.0.1", reason="coerced found")
         task = d._scan_progress.tasks[0]
-        assert "vulnerable found" in task.fields["status"]
+        assert "coerced found" in task.fields["status"]
 
     def test_unknown_target_no_crash(self) -> None:
         d = _make_display()
@@ -234,7 +234,7 @@ class TestAddResult:
         d.set_target_total("10.0.0.1", 10)
 
         counter_map = {
-            TriggerResult.VULNERABLE: "vulnerable",
+            TriggerResult.COERCED: "coerced",
             TriggerResult.ACCESSIBLE: "accessible",
             TriggerResult.SENT: "sent",
             TriggerResult.ACCESS_DENIED: "access_denied",
@@ -256,8 +256,8 @@ class TestAddResult:
         d = _make_display()
         d.set_target_total("10.0.0.1", 20)
 
-        # VULNERABLE, ACCESSIBLE, SENT are interesting
-        d.add_result(_make_result(result=TriggerResult.VULNERABLE, method="M1"))
+        # COERCED, ACCESSIBLE, SENT are interesting
+        d.add_result(_make_result(result=TriggerResult.COERCED, method="M1"))
         d.add_result(_make_result(result=TriggerResult.ACCESSIBLE, method="M2"))
         d.add_result(_make_result(result=TriggerResult.SENT, method="M3"))
         assert len(d._interesting_results) == 3
@@ -276,7 +276,7 @@ class TestAddResult:
         for t in targets:
             d.set_target_total(t, 5)
 
-        d.add_result(_make_result(target="10.0.0.1", result=TriggerResult.VULNERABLE))
+        d.add_result(_make_result(target="10.0.0.1", result=TriggerResult.COERCED))
         d.add_result(
             _make_result(target="10.0.0.2", result=TriggerResult.ACCESS_DENIED)
         )
@@ -284,7 +284,7 @@ class TestAddResult:
             _make_result(target="10.0.0.3", result=TriggerResult.NOT_AVAILABLE)
         )
 
-        assert d._target_progress["10.0.0.1"].vulnerable == 1
+        assert d._target_progress["10.0.0.1"].coerced == 1
         assert d._target_progress["10.0.0.2"].access_denied == 1
         assert d._target_progress["10.0.0.3"].not_available == 1
 
@@ -306,15 +306,15 @@ class TestResultUpgraded:
 
         tp = d._target_progress["10.0.0.1"]
         assert tp.accessible == 1
-        assert tp.vulnerable == 0
+        assert tp.coerced == 0
         assert tp.completed == 1
 
-        # Upgrade to VULNERABLE
-        result.result = TriggerResult.VULNERABLE
+        # Upgrade to COERCED
+        result.result = TriggerResult.COERCED
         d.result_upgraded(result, old_status=TriggerResult.ACCESSIBLE)
 
         assert tp.accessible == 0
-        assert tp.vulnerable == 1
+        assert tp.coerced == 1
         # completed should NOT change (result_upgraded doesn't touch it)
         assert tp.completed == 1
 
@@ -327,8 +327,8 @@ class TestResultUpgraded:
         d.add_result(result)
         assert len(d._interesting_results) == 0
 
-        # Upgrade to VULNERABLE (interesting)
-        result.result = TriggerResult.VULNERABLE
+        # Upgrade to COERCED (interesting)
+        result.result = TriggerResult.COERCED
         d.result_upgraded(result, old_status=TriggerResult.UNKNOWN_ERROR)
         assert len(d._interesting_results) == 1
         assert d._interesting_results[0] is result
@@ -342,15 +342,15 @@ class TestResultUpgraded:
         d.add_result(result)
         assert len(d._interesting_results) == 1
 
-        # Upgrade ACCESSIBLE → VULNERABLE (both interesting)
-        result.result = TriggerResult.VULNERABLE
+        # Upgrade ACCESSIBLE → COERCED (both interesting)
+        result.result = TriggerResult.COERCED
         d.result_upgraded(result, old_status=TriggerResult.ACCESSIBLE)
         # Should NOT add a duplicate entry
         assert len(d._interesting_results) == 1
 
     def test_upgrade_unknown_target_no_crash(self) -> None:
         d = _make_display()
-        result = _make_result(target="unknown.host", result=TriggerResult.VULNERABLE)
+        result = _make_result(target="unknown.host", result=TriggerResult.COERCED)
         d.result_upgraded(result, old_status=TriggerResult.ACCESSIBLE)
 
 
@@ -360,7 +360,7 @@ class TestResultUpgraded:
 class TestCounterHelpers:
     def test_increment_all_statuses(self) -> None:
         tp = _TargetProgress()
-        ScanDisplay._increment_counter(tp, TriggerResult.VULNERABLE)
+        ScanDisplay._increment_counter(tp, TriggerResult.COERCED)
         ScanDisplay._increment_counter(tp, TriggerResult.ACCESSIBLE)
         ScanDisplay._increment_counter(tp, TriggerResult.SENT)
         ScanDisplay._increment_counter(tp, TriggerResult.ACCESS_DENIED)
@@ -369,7 +369,7 @@ class TestCounterHelpers:
         ScanDisplay._increment_counter(tp, TriggerResult.TIMEOUT)
         ScanDisplay._increment_counter(tp, TriggerResult.UNKNOWN_ERROR)
 
-        assert tp.vulnerable == 1
+        assert tp.coerced == 1
         assert tp.accessible == 1
         assert tp.sent == 1
         assert tp.access_denied == 1
@@ -380,7 +380,7 @@ class TestCounterHelpers:
 
     def test_decrement_all_statuses(self) -> None:
         tp = _TargetProgress(
-            vulnerable=2,
+            coerced=2,
             accessible=2,
             sent=2,
             access_denied=2,
@@ -389,7 +389,7 @@ class TestCounterHelpers:
             timeouts=2,
             unknown_errors=2,
         )
-        ScanDisplay._decrement_counter(tp, TriggerResult.VULNERABLE)
+        ScanDisplay._decrement_counter(tp, TriggerResult.COERCED)
         ScanDisplay._decrement_counter(tp, TriggerResult.ACCESSIBLE)
         ScanDisplay._decrement_counter(tp, TriggerResult.SENT)
         ScanDisplay._decrement_counter(tp, TriggerResult.ACCESS_DENIED)
@@ -398,7 +398,7 @@ class TestCounterHelpers:
         ScanDisplay._decrement_counter(tp, TriggerResult.TIMEOUT)
         ScanDisplay._decrement_counter(tp, TriggerResult.UNKNOWN_ERROR)
 
-        assert tp.vulnerable == 1
+        assert tp.coerced == 1
         assert tp.accessible == 1
         assert tp.sent == 1
         assert tp.access_denied == 1
@@ -421,7 +421,7 @@ class TestFormatCounters:
     def test_shows_all_nonzero_counters(self) -> None:
         d = _make_display()
         tp = _TargetProgress(
-            vulnerable=2,
+            coerced=2,
             accessible=1,
             sent=3,
             access_denied=4,
@@ -431,7 +431,7 @@ class TestFormatCounters:
             unknown_errors=1,
         )
         text = d._format_counters(tp)
-        assert "2 vuln" in text
+        assert "2 coerced" in text
         assert "1 acc" in text
         assert "3 sent" in text
         assert "4 denied" in text
@@ -442,9 +442,9 @@ class TestFormatCounters:
 
     def test_only_shows_nonzero(self) -> None:
         d = _make_display()
-        tp = _TargetProgress(vulnerable=1, not_available=3)
+        tp = _TargetProgress(coerced=1, not_available=3)
         text = d._format_counters(tp)
-        assert "vuln" in text
+        assert "coerced" in text
         assert "n/a" in text
         assert "acc" not in text
         assert "sent" not in text
@@ -530,7 +530,7 @@ class TestEndToEndFlow:
         d.add_result(
             _make_result(
                 target="10.0.0.1",
-                result=TriggerResult.VULNERABLE,
+                result=TriggerResult.COERCED,
                 method="EfsRpcOpenFileRaw",
             )
         )
@@ -543,7 +543,7 @@ class TestEndToEndFlow:
 
         tp1 = d._target_progress["10.0.0.1"]
         assert tp1.completed == 5
-        assert tp1.vulnerable == 1
+        assert tp1.coerced == 1
         assert tp1.access_denied == 1
         assert tp1.not_available == 3
 
@@ -560,20 +560,20 @@ class TestEndToEndFlow:
         assert tp2.not_available == 1
         assert tp2.timeouts == 1
 
-        # Findings table should have VULNERABLE + ACCESSIBLE = 2 rows
+        # Findings table should have COERCED + ACCESSIBLE = 2 rows
         assert len(d._interesting_results) == 2
 
         # 6. Drain phase with an upgrade
         d.start_drain()
         assert d._phase == "drain"
 
-        # Simulate late callback upgrading ACCESSIBLE → VULNERABLE
+        # Simulate late callback upgrading ACCESSIBLE → COERCED
         accessible_result = d._interesting_results[1]  # The ACCESSIBLE one
-        accessible_result.result = TriggerResult.VULNERABLE
+        accessible_result.result = TriggerResult.COERCED
         d.result_upgraded(accessible_result, old_status=TriggerResult.ACCESSIBLE)
 
         assert tp2.accessible == 0
-        assert tp2.vulnerable == 1
+        assert tp2.coerced == 1
 
         # Still 2 interesting results (the object was mutated in place)
         assert len(d._interesting_results) == 2
@@ -596,7 +596,7 @@ class TestResultsTable:
         d.set_target_total("10.0.0.1", 5)
         d.add_result(
             _make_result(
-                result=TriggerResult.VULNERABLE,
+                result=TriggerResult.COERCED,
                 auth_user=r"CORP\admin",
                 ntlmv2_hash="admin::CORP:abc:def:1234",
             )
@@ -620,7 +620,7 @@ class TestResultsTable:
         d.add_result(_make_result(result=TriggerResult.ACCESSIBLE, method="M2"))
         assert d._build_results_table().row_count == 2  # type: ignore[union-attr]
 
-        d.add_result(_make_result(result=TriggerResult.VULNERABLE, method="M3"))
+        d.add_result(_make_result(result=TriggerResult.COERCED, method="M3"))
         assert d._build_results_table().row_count == 3  # type: ignore[union-attr]
 
         # Non-interesting result shouldn't add a row

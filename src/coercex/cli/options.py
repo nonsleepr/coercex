@@ -65,7 +65,7 @@ TimeoutOpt = Annotated[
 ]
 VerboseOpt = Annotated[
     bool,
-    typer.Option("-v", "--verbose", help="Show all results, not just vulnerable"),
+    typer.Option("-v", "--verbose", help="Show all results, not just coerced"),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Output results as JSON")]
 OutputFileOpt = Annotated[
@@ -106,13 +106,13 @@ RedirectOpt = Annotated[
         ),
     ),
 ]
-StopOnVulnerableOpt = Annotated[
+StopOnCoercedOpt = Annotated[
     bool,
     typer.Option(
-        "--stop-on-vulnerable",
+        "--stop-on-coerced",
         help=(
-            "Stop scanning a target as soon as one vulnerable method is confirmed. "
-            "Reduces noise but may miss additional vulnerable methods."
+            "Stop scanning a target as soon as one coerced method is confirmed. "
+            "Reduces noise but may miss additional coercible methods."
         ),
     ),
 ]
