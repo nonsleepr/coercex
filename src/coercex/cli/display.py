@@ -83,6 +83,7 @@ class ScanDisplay:
             t: _TargetProgress() for t in targets
         }
         self._interesting_results: list[ScanResult] = []
+        self._printed_hashes: set[str] = set()
 
         self._phase: str = "init"
 
@@ -234,14 +235,16 @@ class ScanDisplay:
         # Immediate notification for VULNERABLE results above the live display
         if result.result == TriggerResult.VULNERABLE:
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
+            tr = f" [dim]({result.transport})[/]" if result.transport else ""
             self._console.print(
                 f"  [bold green][+] VULNERABLE[/] {result.target} "
                 f"[blue]{result.protocol}[/]::{result.method}"
-                f"{auth}"
+                f"{tr}{auth}"
             )
 
-        # Print captured hash above the live display
-        if result.ntlmv2_hash:
+        # Print captured hash above the live display (deduplicate)
+        if result.ntlmv2_hash and result.ntlmv2_hash not in self._printed_hashes:
+            self._printed_hashes.add(result.ntlmv2_hash)
             self._console.print(
                 f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
                 highlight=False,
@@ -281,12 +284,14 @@ class ScanDisplay:
         # Notifications
         if result.result == TriggerResult.VULNERABLE:
             auth = f" [bold magenta]{result.auth_user}[/]" if result.auth_user else ""
+            tr = f" [dim]({result.transport})[/]" if result.transport else ""
             self._console.print(
                 f"  [bold green][+] UPGRADED → VULNERABLE[/] {result.target} "
                 f"[blue]{result.protocol}[/]::{result.method}"
-                f"{auth}"
+                f"{tr}{auth}"
             )
-        if result.ntlmv2_hash:
+        if result.ntlmv2_hash and result.ntlmv2_hash not in self._printed_hashes:
+            self._printed_hashes.add(result.ntlmv2_hash)
             self._console.print(
                 f"    [bold yellow]Hash:[/] {result.ntlmv2_hash}",
                 highlight=False,
