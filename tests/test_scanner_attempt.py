@@ -79,13 +79,14 @@ def _make_callback(
     username: str = "",
     domain: str = "",
     ntlmv2_hash: str = "",
+    transport: str = "smb",
 ) -> AuthCallback:
     return AuthCallback(
         token=token,
         source_ip=src_ip,
         source_port=49152,
         timestamp=datetime.now(timezone.utc),
-        transport="smb",
+        transport=transport,
         username=username,
         domain=domain,
         ntlmv2_hash=ntlmv2_hash,
@@ -380,9 +381,70 @@ class TestAttemptTimestampFallback:
         assert result.callback_received is True
         assert result.auth_user == "CORP\\DC01$"
 
+    @pytest.mark.asyncio
+    async def test_transport_mismatch_stays_accessible(self) -> None:
+        """HTTP trigger should NOT be upgraded by an SMB callback.
 
-# ---------------------------------------------------------------------------
-# _drain_callbacks
+        When both transports fire concurrently, the SMB callback
+        (transport="smb") should not be claimed by the HTTP trigger.
+        """
+        config = _make_config(callback_timeout=0.05)
+        scanner = Scanner(config)
+
+        listener = AsyncListener(enable_http=False, enable_smb=False)
+        listener._loop = asyncio.get_running_loop()
+        scanner._listener = listener
+
+        mock_pool = AsyncMock()
+        mock_pool.trigger_method = AsyncMock(
+            return_value=_mock_pool_result(TriggerResult.ACCESSIBLE)
+        )
+        scanner._pool = mock_pool
+
+        method = _make_method()
+        binding = method.pipe_bindings[0]
+
+        original_create_token = listener.create_token
+
+        def patched_create_token(target_ip=""):
+            token, future = original_create_token(target_ip=target_ip)
+
+            # Record an SMB callback (wrong transport for HTTP trigger)
+            async def record_partial():
+                await asyncio.sleep(0.01)
+                listener._ip_callback_times.setdefault(TARGET_IP, []).append(
+                    time.monotonic()
+                )
+                cb = _make_callback(
+                    username="DC01$",
+                    domain="CORP",
+                    ntlmv2_hash="hash1",
+                    transport="smb",  # SMB callback, not HTTP
+                )
+                listener._record_partial_callback(cb)
+
+            asyncio.create_task(record_partial())
+            return token, future
+
+        listener.create_token = patched_create_token
+
+        # Fire as HTTP trigger
+        with patch("coercex.scanner._TREE_CONNECT_EXTENDED_TIMEOUT", 0.1):
+            await scanner._attempt(
+                TARGET_IP,
+                method,
+                binding,
+                transport_override=Transport.HTTP,
+                path_style_override="share_file",
+            )
+
+        assert len(scanner.stats.results) == 1
+        result = scanner.stats.results[0]
+        # Transport mismatch — stays ACCESSIBLE
+        assert result.result == TriggerResult.ACCESSIBLE
+        assert result.callback_received is False
+
+
 # ---------------------------------------------------------------------------
 
 

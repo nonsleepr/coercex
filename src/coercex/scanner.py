@@ -738,8 +738,18 @@ class Scanner:
                                     # the target connected after our
                                     # trigger.  (Some targets strip the
                                     # token from the TREE_CONNECT path.)
+                                    #
+                                    # We also verify the callback transport
+                                    # matches the trigger transport to
+                                    # avoid cross-transport false positives
+                                    # (e.g. an SMB callback being claimed
+                                    # by an HTTP trigger).
                                     cb = listener.get_callback_since(target, t_before)
-                                    if cb is not None:
+                                    trigger_transport = transport.name.lower()
+                                    if (
+                                        cb is not None
+                                        and cb.transport == trigger_transport
+                                    ):
                                         result.callback_received = True
                                         result.source_ip = cb.source_ip
                                         result.result = TriggerResult.VULNERABLE
@@ -758,12 +768,23 @@ class Scanner:
                                             method.function_name,
                                         )
                                     else:
-                                        log.debug(
-                                            "Extended wait timed out for %s %s::%s — no callback data",
-                                            target,
-                                            method.protocol_short,
-                                            method.function_name,
-                                        )
+                                        if cb is not None:
+                                            log.debug(
+                                                "Extended wait: callback transport mismatch "
+                                                "(%s != %s) for %s %s::%s",
+                                                cb.transport,
+                                                trigger_transport,
+                                                target,
+                                                method.protocol_short,
+                                                method.function_name,
+                                            )
+                                        else:
+                                            log.debug(
+                                                "Extended wait timed out for %s %s::%s — no callback data",
+                                                target,
+                                                method.protocol_short,
+                                                method.function_name,
+                                            )
                             else:
                                 # No connection at all — target didn't call back
                                 log.debug(
